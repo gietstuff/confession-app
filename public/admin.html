@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GIET Confession Admin</title>
+  <style>
+    body{margin:0;padding:0;font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;background:#fdf2f8;color:#4a1f42;}
+    .wrap{max-width:960px;margin:18px auto; padding:24px;}
+    .box{background:#fff; border-radius:16px; box-shadow:0 10px 24px rgba(157,18,89,.18); padding:18px; margin-bottom:16px;}
+    h1{margin-bottom:10px;font-size:1.9rem;color:#a11659;}
+    input[type=password]{width:100%;padding:10px;border:1px solid #f0b8d1;border-radius:10px;font-size:1rem;}
+    button{background:#e12f71;color:#fff;border:0;border-radius:10px;padding:10px 16px;font-size:1rem;cursor:pointer;}
+    button:hover{filter:brightness(1.04);}
+    .panel{margin-top:16px;}
+    .txt-small{color:#7e4d75;}
+    .item{background:linear-gradient(150deg,#ffe9f6,#ffb9dc);border-radius:12px;border:1px solid #f7a6d3;padding:12px;margin-bottom:12px;position:relative;}
+    .item .time{font-size:.82rem;color:#6e325c;}
+    .item .btn-box{margin-top:10px;display:flex;gap:8px;}
+    .item button{flex:1;}
+    .stats{display:flex;gap:12px;flex-wrap:wrap;}
+    .stat-box{background:#ffe4f0;padding:14px;border-radius:12px;flex:1;min-width:168px;}
+    .stat-box h3{margin:0;color:#a01661;}
+    #modStatus{margin-top:10px;font-weight:700;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Admin Moderation (Secret URL)</h1>
+    <div class="box" id="loginBox">
+      <div class="txt-small">Enter admin password to moderate confessions:</div>
+      <input type="password" id="adminPass" placeholder="Admin Password" />
+      <button id="loginBtn" style="margin-top:10px;">Login</button>
+      <div id="loginMsg" class="txt-small" style="margin-top:8px;color:#a21d5f;"></div>
+    </div>
+
+    <div id="contentPanel" class="panel hidden">
+      <div class="stats">
+        <div class="stat-box"><h3 id="visitCount">Visits: 0</h3></div>
+        <div class="stat-box"><h3 id="uniqueCount">Unique Users: 0</h3></div>
+      </div>
+      <div class="box" id="pendingBox"><h3>Pending confessions for review</h3><div id="pendingList"></div></div>
+      <div class="box" id="approvedBox"><h3>Approved confessions</h3><div id="approvedList"></div></div>
+      <div id="modStatus"></div>
+    </div>
+  </div>
+  <script>
+    let authToken = null;
+
+    function setStatus(message, color='#2a6d4d') {
+      const el = document.getElementById('modStatus');
+      el.textContent = message;
+      el.style.color = color;
+      setTimeout(()=>el.textContent = '',4000);
+    }
+
+    async function updateAnalytics() {
+      const res = await fetch('/api/analytics');
+      const data = await res.json();
+      document.getElementById('visitCount').textContent = 'Visits: ' + data.visits;
+      document.getElementById('uniqueCount').textContent = 'Unique users: ' + data.uniqueVisitors;
+    }
+
+    async function loadPending() {
+      const res = await fetch('/api/pending');
+      const arr = await res.json();
+      const container = document.getElementById('pendingList');
+      container.innerHTML = '';
+      if(!arr.length){ container.innerHTML = '<p style="color:#6e3f68">No pending confessions.</p>'; return; }
+      arr.forEach(item => {
+        const div = document.createElement('div');
+        div.className='item';
+        div.innerHTML = `<div class="time">${new Date(item.createdAt).toLocaleString()}</div><p>${item.message}</p><div class="btn-box"><button onclick="moderate('${item.id}','approve')">Approve</button><button onclick="moderate('${item.id}','reject')" style="background:#b73057">Reject</button><button onclick="deleteConfession('${item.id}')" style="background:#c12d50">Delete</button></div>`;
+        container.appendChild(div);
+      });
+    }
+
+    async function loadApproved() {
+      const res = await fetch('/api/confessions');
+      const arr = await res.json();
+      const container = document.getElementById('approvedList');
+      container.innerHTML = '';
+      if(!arr.length){ container.innerHTML = '<p style="color:#6e3f68">No approved confessions yet.</p>'; return; }
+      arr.forEach(item => {
+        const div = document.createElement('div');
+        div.className='item';
+        div.innerHTML = `<div class="time">${new Date(item.createdAt).toLocaleString()} - 👍${item.likes} 👎${item.dislikes}</div><p>${item.message}</p><div class="btn-box"><button onclick="deleteConfession('${item.id}')" style="background:#c12d50">Delete</button></div>`;
+        container.appendChild(div);
+      });
+    }
+
+    async function moderate(confessionId, action) {
+      const res = await fetch('/api/admin/moderate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: authToken, confessionId, action})
+      });
+      const data = await res.json();
+      if (data.error) {
+        setStatus(data.error,'#a1182a');
+      } else {
+        setStatus('Moderation saved.');
+        await loadPending();
+        await loadApproved();
+      }
+    }
+
+    async function deleteConfession(confessionId) {
+      const res = await fetch('/api/admin/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: authToken, confessionId})
+      });
+      const data = await res.json();
+      if (data.error) {
+        setStatus(data.error,'#a1182a');
+      } else {
+        setStatus('Confession deleted.');
+        await loadPending();
+        await loadApproved();
+      }
+    }
+
+    function showAdmin() {
+      document.getElementById('loginBox').classList.add('hidden');
+      document.getElementById('contentPanel').classList.remove('hidden');
+    }
+
+    document.getElementById('loginBtn').addEventListener('click', async () => {
+      const pass = document.getElementById('adminPass').value.trim();
+      const res = await fetch('/api/admin/login', {
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})
+      });
+      const data = await res.json();
+      if (data.token) {
+        authToken = data.token;
+        document.getElementById('loginMsg').textContent='Login successful!';
+        showAdmin();
+        updateAnalytics();
+        loadPending();
+        loadApproved();
+        setInterval(updateAnalytics, 15000);
+        setInterval(loadPending, 12000);
+      } else {
+        document.getElementById('loginMsg').textContent=data.error || 'Login failed';
+      }
+    });
+  </script>
+</body>
+</html>

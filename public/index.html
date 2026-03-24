@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GIET CONFESSION PAGE</title>
+  <style>
+    :root {
+      --bg: #fff0f6;
+      --card: #ffedf5;
+      --text: #530A3C;
+      --accent: #db0a5b;
+      --accent2: #ab0f5f;
+      --soft: #ffb2d3;
+    }
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;}
+    body{background: radial-gradient(circle at top, #ffe9f0, #ffd8e7 35%, #fce3f1 100%); color: var(--text); min-height:100vh;}
+    .container{max-width:900px;margin:0 auto;padding:20px 15px 60px;}
+    .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:12px;}
+    .title{font-size:2.3rem;font-weight:800;text-transform:uppercase;letter-spacing:.1em;color:#f3276e;text-shadow:2px 2px 12px rgba(157,0,96,.25);} 
+    .subtitle{font-size:1.05rem;color:#4b1f42;margin-top:6px;}
+    .notice{position:fixed;top:16px;right:16px;background:rgba(255,51,123,0.95);color:#fff;padding:14px 20px;border-radius:14px;box-shadow:0 10px 25px rgba(189,42,124,.35);transform:translateY(-120%);opacity:0;transition:all .35s ease;z-index:999;font-size:1.1rem;font-weight:800;letter-spacing:.03em;}
+    .notice.show{transform:translateY(0);opacity:1;}
+    .anime-rain{animation:pop .9s ease forwards;}
+    @keyframes pop {0%{transform:scale(.7) translateY(-8px);opacity:0}100%{transform:scale(1) translateY(0);opacity:1}}
+    .card{background:var(--card);border:2px dashed rgba(255,89,153,.45);border-radius:22px;padding:18px;box-shadow:0 12px 30px rgba(220,59,121,.15);}
+    .disclaimer{background:rgba(255,255,255,.85);backdrop-filter:blur(5px);border-radius:12px;padding:14px;margin-bottom:16px;color:#5c2d4c;border:1px solid #f3c2d6;}
+    .conf-form textarea{width:100%;min-height:110px;border:2px solid #ffb3d9;border-radius:14px;padding:12px;font-size:1rem;resize:vertical;}
+    .conf-form button{background:linear-gradient(145deg,#ff5089,#ff1479);color:#fff;border:0;border-radius:12px;padding:11px 20px;font-size:1rem;font-weight:700;cursor:pointer;box-shadow:0 10px 18px rgba(178,27,83,.32);transition:all .2s ease;}
+    .conf-form button:hover{transform:translateY(-1px);box-shadow:0 14px 23px rgba(178,27,83,.42);}
+    .conf-form small{display:block;margin-top:8px;color:#80335f;}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-top:22px;}
+    .message-card{background: linear-gradient(145deg, #fff, #ffd6ec);border-radius:16px;padding:22px;position:relative;overflow:hidden;box-shadow:0 12px 20px rgba(199,31,96,.25);border:1px solid rgba(255,104,146,.45);min-height:100px;}
+    .message-card::before{content:'❤️';position:absolute;font-size:64px;opacity:.12;top:-10px;right:-10px;transform:rotate(13deg);}
+    .msg-text{color:#4f1f41;font-size:0.98rem;white-space:pre-wrap;word-wrap:break-word;min-height:60px;}
+    .meta{margin-top:11px;display:flex;justify-content:space-between;align-items:center;gap:10px;}
+    .meta span{font-size:.85rem;color:#773962;font-weight:600;}
+    .votes button{background:#fff0f8;border:1px solid #fc9fc4;color:#9c2a69;padding:5px 8px;border-radius:10px;cursor:pointer;margin-right:6px;font-weight:600;}
+    .votes button:hover{background:#ffe1ef;}
+    .animated-heart{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);font-size:28px;color:#ff2f7d;animation:heart-beat 1.4s ease-in-out infinite;}
+    @keyframes heart-beat {0%,100%{transform:translateX(-50%) scale(1);}40%{transform:translateX(-50%) scale(1.13);}}    
+    .hidden{display:none;}
+    .admin-link{margin-top:16px;text-align:right;}
+    .admin-link a{color:#d11b67;text-decoration:none;font-weight:700;}
+    .ig-link{position:fixed;top:80px;right:16px;background:linear-gradient(135deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888);color:#fff;padding:12px 16px;border-radius:14px;text-decoration:none;font-weight:700;font-size:0.95rem;display:flex;align-items:center;gap:8px;z-index:998;box-shadow:0 8px 20px rgba(220,59,121,.3);transition:transform .2s ease;}
+    .ig-link:hover{transform:scale(1.05);}
+    .ig-logo{width:20px;height:20px;font-size:1.2rem;}
+
+    @media (max-width: 768px) {
+      .container { padding: 15px 10px 40px; }
+      .title { font-size: 1.8rem; }
+      .subtitle { font-size: 0.9rem; }
+      .notice { top: 10px; right: 10px; padding: 10px 15px; font-size: 1rem; }
+      .ig-link { top: 65px; right: 10px; padding: 10px 14px; font-size: 0.85rem; }
+      .card { padding: 14px; }
+      .conf-form textarea { min-height: 100px; padding: 10px; font-size: 1rem; }
+      .conf-form button { padding: 12px 18px; font-size: 1rem; }
+      .grid { grid-template-columns: 1fr; gap: 12px; }
+      .message-card { padding: 12px; }
+      .msg-text { font-size: 0.95rem; }
+      .meta span { font-size: 0.8rem; }
+      .votes button { padding: 8px 12px; font-size: 0.9rem; margin-right: 4px; }
+      .animated-heart { font-size: 24px; bottom: 20px; }
+      .disclaimer { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <audio id="notifSound" src="" preload="auto"></audio>
+  <div id="notif" class="notice">NEW CONFESSION!</div>
+  <a href="https://www.instagram.com/" target="_blank" class="ig-link">
+    <span class="ig-logo">📷</span>
+    <span>INSTAGRAM CONFESSION PAGE</span>
+  </a>
+  <div class="container">
+    <div class="header">
+      <div>
+        <div class="title">GIET CONFESSION PAGE</div>
+        <div class="subtitle">Share anonymous crush messages, love secrets, and positive vibes.</div>
+        <div class="subtitle" id="analyticsInfo" style="margin-top: 6px; font-size: 0.95rem; color: #6f2f5b;">Visits: 0 | Unique: 0 | Live: 0</div>
+      </div>
+      <div class="animated-heart">💗</div>
+    </div>
+
+    <div class="disclaimer">
+      <strong>Disclaimer:</strong> This page is for entertainment purposes only. Keep messages friendly, respectful and safe. Offensive content is filtered and may be rejected by admin.
+    </div>
+
+    <div class="card conf-form">
+      <h2>Submit a confession</h2>
+      <textarea id="confessionInput" maxlength="2400" placeholder="Type your anonymous message (max 400 words)"></textarea>
+      <small id="wordInfo">Word count: 0 / 400</small>
+      <button id="submitBtn">Send Anonymous</button>
+      <div id="status" style="margin-top:8px;color:#7f2a55;font-weight:700;"></div>
+    </div>
+
+    <div class="grid" id="confessionsGrid"></div>
+
+    <div class="card" style="margin-top:20px;">
+      <h3 style="margin:0 0 10px;">Website Updates</h3>
+      <ul id="updateLog" style="padding-left:18px;color:#6b2f56;">
+        <li>v1.0: Initial confession features</li>
+        <li>v1.1: Added like/dislike and 24h auto-expiry</li>
+        <li>v1.2: Admin moderation + delete feature</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    const abusive = ['fuck','shit','bitch','asshole','cunt','dick','piss','slut'];
+    const input = document.getElementById('confessionInput');
+    const wordInfo = document.getElementById('wordInfo');
+    const status = document.getElementById('status');
+    const notif = document.getElementById('notif');
+
+    function countWords(text) {
+      return text.trim().split(/\s+/).filter(Boolean).length;
+    }
+
+    function filterNumbersAndAbuse(text) {
+      let out = text.replace(/\d+/g, '');
+      abusive.forEach(word => {
+        const r = new RegExp(word, 'gi');
+        out = out.replace(r, '***');
+      });
+      return out;
+    }
+
+    // Keep track of the timer globally so we can cancel it
+let notifTimer;
+//changed by ayus
+function showNotification(message) {
+  const notif = document.getElementById('notif'); // Ensure it's defined
+  const audio = document.getElementById('notifSound');
+
+  // 1. Clear any existing timer to prevent early disappearance
+  clearTimeout(notifTimer);
+
+  // 2. Reset classes to "restart" animations
+  notif.classList.remove('show', 'anime-rain');
+  
+  // Trigger a "reflow" so the browser notices the class was removed
+  void notif.offsetWidth; 
+
+  // 3. Update content and show
+  notif.textContent = (message || 'NEW CONFESSION') + ' !';
+  notif.classList.add('show', 'anime-rain');
+
+  // 4. Play Audio
+  if (audio && audio.src) {
+    audio.currentTime = 0;
+    audio.play().catch(() => { /* Silence play errors */ });
+  }
+
+  // 5. Set the 5-second disappearance
+  notifTimer = setTimeout(() => {
+    notif.classList.remove('show', 'anime-rain');
+  }, 5000);
+}
+
+    let seenConfIds = new Set();
+
+    function getClientId() {
+      let id = localStorage.getItem('giet_confession_cid');
+      if (!id) { id = crypto.randomUUID(); localStorage.setItem('giet_confession_cid', id); }
+      return id;
+    }
+
+    function fetchConfessions() {
+      fetch('/api/confessions').then(r => r.json()).then(data => {
+        const grid = document.getElementById('confessionsGrid');
+        grid.innerHTML = '';
+
+        const newMessages = data.filter(msg => !seenConfIds.has(msg.id));
+        if (newMessages.length > 0 && seenConfIds.size > 0) {
+          showNotification('NEW CONFESSION');
+        }
+
+        seenConfIds = new Set(data.map(msg => msg.id));
+
+        if (!data.length) {
+          grid.innerHTML = '<p style="width:100%;text-align:center;color:#8b4b78;padding:24px;background:rgba(255,255,255,.7);border-radius:12px">No approved confessions yet.</p>';
+          return;
+        }
+        data.forEach(msg => {
+          const card = document.createElement('div');
+          card.className = 'message-card';
+          card.innerHTML = `<div class="msg-text">${msg.message}</div><div class="meta"><span>${new Date(msg.createdAt).toLocaleString()}</span><div class="votes"><button onclick="vote('${msg.id}','like')">👍 ${msg.likes}</button><button onclick="vote('${msg.id}','dislike')">👎 ${msg.dislikes}</button></div></div>`;
+          grid.appendChild(card);
+        });
+      });
+    }
+
+    window.vote = function(id, type) {
+      fetch(`/api/${type}/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: getClientId() })
+      }).then(r => r.json()).then(data => {
+        if (data.error) { console.warn(data.error); }
+        fetchConfessions();
+      }).catch(console.error);
+    };
+
+    input.addEventListener('input', () => {
+      const text = input.value;
+      let wordCount = countWords(text);
+      if (wordCount > 400) {
+        status.textContent = 'Word limit reached 400 words.';
+        status.style.color = '#ab1c4c';
+      } else {
+        status.textContent = '';
+      }
+      wordInfo.textContent = `Word count: ${wordCount} / 400`;
+    });
+
+    document.getElementById('submitBtn').addEventListener('click', () => {
+      let message = input.value.trim();
+      const wordCount = countWords(message);
+      if (wordCount === 0) return status.textContent = 'Please type a message first.';
+      if (wordCount > 400) return status.textContent = 'Please reduce to 400 words.';
+
+      message = filterNumbersAndAbuse(message);
+      if (!message.trim()) return status.textContent = 'Your message is empty after filtering.';
+
+      fetch('/api/confessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, clientId: getClientId() })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          status.textContent = data.error;
+          status.style.color = '#a10d46';
+        } else {
+          status.textContent = 'Saved for admin review. Thank you!';
+          status.style.color = '#1b6b43';
+          input.value = '';
+          wordInfo.textContent = 'Word count: 0 / 400';
+        }
+      })
+      .catch(() => {
+        status.textContent = 'Network issue. Try again.';
+      });
+    });
+
+    function updateVisit() {
+      analytics = JSON.parse(localStorage.getItem('giet_confession_visits') || '{}');
+      if (!analytics.seen) {
+        localStorage.setItem('giet_confession_visits', JSON.stringify({ seen: true }));
+      }
+    }
+
+    async function registerVisit() {
+      if (localStorage.getItem('giet_visit_registered')) {
+        return;
+      }
+      const clientId = getClientId();
+      try {
+        await fetch('/api/visit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId })
+        });
+        localStorage.setItem('giet_visit_registered', 'true');
+      } catch (err) {
+        console.warn('visit registration failed', err);
+      }
+    }
+
+    async function updateVisitorInfo() {
+      try {
+        const res = await fetch('/api/analytics');
+        const data = await res.json();
+        const label = document.getElementById('analyticsInfo');
+        if (label && data) {
+          label.textContent = `Visits: ${data.visits} | Unique: ${data.uniqueVisitors} | Live: ${data.activeVisitors}`;
+        }
+      } catch (err) {
+        console.warn('analytics update failed', err);
+      }
+    }
+
+    window.addEventListener('load', () => {
+      window.setInterval(fetchConfessions, 12000);
+      window.setInterval(updateVisitorInfo, 15000);
+      registerVisit();
+      fetchConfessions();
+      updateVisitorInfo();
+      updateVisit();
+    });
+  </script>
+</body>
+</html>

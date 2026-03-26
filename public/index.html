@@ -77,7 +77,16 @@
       <div>
         <div class="title">GIET CONFESSION PAGE</div>
         <div class="subtitle">Share anonymous crush messages, love secrets, and positive vibes.</div>
-        <div class="subtitle" id="analyticsInfo" style="margin-top: 6px; font-size: 0.95rem; color: #6f2f5b;">Visits: 0 | Unique: 0 | Live: 0</div>
+        <div class="analytics-box" style="margin-top: 10px; display:flex;gap:12px;">
+          <div class="analytics-card" style="flex:1;background:#fff5f9;border:1px solid #ffc5dc;border-radius:12px;padding:10px;text-align:center;box-shadow:0 6px 18px rgba(198,52,109,.14);">
+            <div style="color:#a12f66;font-size:.75rem;letter-spacing:.05em;text-transform:uppercase;font-weight:700">Visits</div>
+            <div id="visitsCount" style="font-size:1.3rem;font-weight:800;color:#cd1d65">0</div>
+          </div>
+          <div class="analytics-card" style="flex:1;background:#fff5f9;border:1px solid #ffc5dc;border-radius:12px;padding:10px;text-align:center;box-shadow:0 6px 18px rgba(198,52,109,.14);">
+            <div style="color:#a12f66;font-size:.75rem;letter-spacing:.05em;text-transform:uppercase;font-weight:700">Live</div>
+            <div id="liveCount" style="font-size:1.3rem;font-weight:800;color:#cd1d65">0</div>
+          </div>
+        </div>
       </div>
       <div class="animated-heart">💗</div>
     </div>
@@ -107,6 +116,7 @@
   </div>
 
   <script>
+    const API_BASE = 'https://giet-confession-backend.onrender.com';
     const abusive = ['fuck','shit','bitch','asshole','cunt','dick','piss','slut'];
     const input = document.getElementById('confessionInput');
     const wordInfo = document.getElementById('wordInfo');
@@ -167,7 +177,7 @@ function showNotification(message) {
     }
 
     function fetchConfessions() {
-      fetch('/api/confessions').then(r => r.json()).then(data => {
+      fetch(`${API_BASE}/api/confessions`).then(r => r.json()).then(data => {
         const grid = document.getElementById('confessionsGrid');
         grid.innerHTML = '';
 
@@ -192,7 +202,7 @@ function showNotification(message) {
     }
 
     window.vote = function(id, type) {
-      fetch(`/api/${type}/${id}`, {
+      fetch(`${API_BASE}/api/${type}/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clientId: getClientId() })
@@ -223,7 +233,7 @@ function showNotification(message) {
       message = filterNumbersAndAbuse(message);
       if (!message.trim()) return status.textContent = 'Your message is empty after filtering.';
 
-      fetch('/api/confessions', {
+      fetch(`${API_BASE}/api/confessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, clientId: getClientId() })
@@ -253,17 +263,13 @@ function showNotification(message) {
     }
 
     async function registerVisit() {
-      if (localStorage.getItem('giet_visit_registered')) {
-        return;
-      }
       const clientId = getClientId();
       try {
-        await fetch('/api/visit', {
+        await fetch(`${API_BASE}/api/visit`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ clientId })
         });
-        localStorage.setItem('giet_visit_registered', 'true');
       } catch (err) {
         console.warn('visit registration failed', err);
       }
@@ -271,11 +277,15 @@ function showNotification(message) {
 
     async function updateVisitorInfo() {
       try {
-        const res = await fetch('/api/analytics');
+        const res = await fetch(`${API_BASE}/api/analytics`);  // GET only - no POST!
         const data = await res.json();
-        const label = document.getElementById('analyticsInfo');
-        if (label && data) {
-          label.textContent = `Visits: ${data.visits} | Unique: ${data.uniqueVisitors} | Live: ${data.activeVisitors}`;
+        const labelVisits = document.getElementById('visitsCount');
+        const labelLive = document.getElementById('liveCount');
+        if (labelVisits && data) {
+          labelVisits.textContent = `${data.visits}`;
+        }
+        if (labelLive && data) {
+          labelLive.textContent = `${data.activeVisitors}`;
         }
       } catch (err) {
         console.warn('analytics update failed', err);
@@ -286,9 +296,9 @@ function showNotification(message) {
       window.setInterval(fetchConfessions, 12000);
       window.setInterval(updateVisitorInfo, 15000);
       registerVisit();
+      setInterval(registerVisit, 25000); // heartbeat for live visitor count
       fetchConfessions();
       updateVisitorInfo();
-      updateVisit();
     });
   </script>
 </body>

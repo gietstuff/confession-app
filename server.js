@@ -248,9 +248,9 @@ app.post('/api/visit', (req, res) => {
   if (!uniqueByClient.has(clientId)) {
     uniqueByClient.add(clientId);
     analytics.uniqueVisitors = uniqueByClient.size;
+    analytics.visits += 1; // Count only first visit per clientId
   }
 
-  analytics.visits += 1;
   activeVisitors.set(clientId, Date.now());
   analytics.activeVisitors = activeVisitors.size;
   saveData();

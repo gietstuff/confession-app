@@ -27,6 +27,9 @@
 <body>
   <div class="wrap">
     <h1>Admin Moderation (Secret URL)</h1>
+    <div id="adminNotif" class="box" style="background:#fff3cf;border:1px solid #f4c24b;color:#6b4e00;display:none;margin-bottom:12px;">
+      Waiting for new confessions...
+    </div>
     <div class="box" id="loginBox">
       <div class="txt-small">Enter admin password to moderate confessions:</div>
       <input type="password" id="adminPass" placeholder="Admin Password" />
@@ -45,7 +48,35 @@
     </div>
   </div>
   <script>
+    const API_BASE = 'https://giet-confession-backend.onrender.com';
     let authToken = null;
+    let lastPendingLength = null;
+
+    function adminNotify(message) {
+      const el = document.getElementById('adminNotif');
+      el.textContent = message;
+      el.style.display = 'block';
+      setTimeout(() => {
+        if (el.textContent === message) {
+          el.style.display = 'none';
+        }
+      }, 10000);
+
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('GIET Confession Admin', { body: message });
+      }
+    }
+
+    function requestAdminNotificationPermission() {
+      if (!('Notification' in window)) return;
+      if (Notification.permission === 'default') {
+        Notification.requestPermission().then(result => {
+          if (result === 'granted') {
+            adminNotify('Desktop notifications enabled.');
+          }
+        });
+      }
+    }
 
     function setStatus(message, color='#2a6d4d') {
       const el = document.getElementById('modStatus');
@@ -55,15 +86,22 @@
     }
 
     async function updateAnalytics() {
-      const res = await fetch('/api/analytics');
+      const res = await fetch(`${API_BASE}/api/analytics`);
       const data = await res.json();
       document.getElementById('visitCount').textContent = 'Visits: ' + data.visits;
       document.getElementById('uniqueCount').textContent = 'Unique users: ' + data.uniqueVisitors;
     }
 
     async function loadPending() {
-      const res = await fetch('/api/pending');
+      const res = await fetch(`${API_BASE}/api/pending`);
       const arr = await res.json();
+
+      if (lastPendingLength !== null && arr.length > lastPendingLength) {
+        const diff = arr.length - lastPendingLength;
+        adminNotify(`${diff} new confession${diff > 1 ? 's' : ''} awaiting review`);
+      }
+      lastPendingLength = arr.length;
+
       const container = document.getElementById('pendingList');
       container.innerHTML = '';
       if(!arr.length){ container.innerHTML = '<p style="color:#6e3f68">No pending confessions.</p>'; return; }
@@ -76,7 +114,7 @@
     }
 
     async function loadApproved() {
-      const res = await fetch('/api/confessions');
+      const res = await fetch(`${API_BASE}/api/confessions`);
       const arr = await res.json();
       const container = document.getElementById('approvedList');
       container.innerHTML = '';
@@ -90,7 +128,7 @@
     }
 
     async function moderate(confessionId, action) {
-      const res = await fetch('/api/admin/moderate', {
+      const res = await fetch(`${API_BASE}/api/admin/moderate`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: authToken, confessionId, action})
@@ -106,7 +144,7 @@
     }
 
     async function deleteConfession(confessionId) {
-      const res = await fetch('/api/admin/delete', {
+      const res = await fetch(`${API_BASE}/api/admin/delete`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: authToken, confessionId})
@@ -128,7 +166,7 @@
 
     document.getElementById('loginBtn').addEventListener('click', async () => {
       const pass = document.getElementById('adminPass').value.trim();
-      const res = await fetch('/api/admin/login', {
+      const res = await fetch(`${API_BASE}/api/admin/login`, {
         method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})
       });
       const data = await res.json();
@@ -136,6 +174,7 @@
         authToken = data.token;
         document.getElementById('loginMsg').textContent='Login successful!';
         showAdmin();
+        requestAdminNotificationPermission();
         updateAnalytics();
         loadPending();
         loadApproved();

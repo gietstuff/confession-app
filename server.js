@@ -2,10 +2,12 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const DATA_FILE = path.join(__dirname, 'data.json');
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -19,6 +21,37 @@ let pendingConfessions = [];
 let analytics = { visits: 0, uniqueVisitors: 0, activeVisitors: 0 };
 let uniqueByClient = new Set();
 let activeVisitors = new Map(); // clientId -> lastHeartbeat timestamp
+
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      confessions = parsed.confessions || [];
+      pendingConfessions = parsed.pendingConfessions || [];
+      analytics = parsed.analytics || analytics;
+      uniqueByClient = new Set(parsed.uniqueByClient || []);
+    }
+  } catch (err) {
+    console.error('Failed to load data file:', err);
+  }
+}
+
+function saveData() {
+  try {
+    const payload = {
+      confessions,
+      pendingConfessions,
+      analytics,
+      uniqueByClient: Array.from(uniqueByClient)
+    };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to save data file:', err);
+  }
+}
+
+loadData();
 
 function sanitizeText(text) {
   if (!text || typeof text !== 'string') return '';
@@ -41,6 +74,7 @@ function cleanupOld() {
   const cutoff = Date.now() - 24 * 3600 * 1000;
   confessions = confessions.filter(item => item.createdAt >= cutoff && item.approved);
   pendingConfessions = pendingConfessions.filter(item => item.createdAt >= cutoff && !item.rejected);
+  saveData();
 }
 
 function cleanupActiveVisitors() {
@@ -89,9 +123,12 @@ app.post('/api/confessions', (req, res) => {
   };
 
   pendingConfessions.unshift(confession);
+  saveData();
 
   if (clientId) {
     uniqueByClient.add(clientId);
+    analytics.uniqueVisitors = uniqueByClient.size;
+    saveData();
   }
 
   return res.json({ status: 'pending', notification: 'NEW CONFESSION' });
@@ -117,6 +154,7 @@ app.post('/api/like/:id', (req, res) => {
 
   item.votes[clientId] = 'like';
   item.likes += 1;
+  saveData();
 
   res.json({ likes: item.likes, dislikes: item.dislikes });
 });
@@ -136,6 +174,7 @@ app.post('/api/dislike/:id', (req, res) => {
 
   item.votes[clientId] = 'dislike';
   item.dislikes += 1;
+  saveData();
 
   res.json({ likes: item.likes, dislikes: item.dislikes });
 });
@@ -166,11 +205,13 @@ app.post('/api/admin/moderate', (req, res) => {
     confession.approved = true;
     confessions.unshift(confession);
     pendingConfessions.splice(idx, 1);
+    saveData();
     return res.json({ updated: confession });
   } else if (action === 'reject') {
     const confession = pendingConfessions[idx];
     confession.rejected = true;
     pendingConfessions.splice(idx, 1);
+    saveData();
     return res.json({ updated: confession });
   }
 
@@ -186,12 +227,14 @@ app.post('/api/admin/delete', (req, res) => {
   let removeIndex = confessions.findIndex(c => c.id === confessionId);
   if (removeIndex >= 0) {
     confessions.splice(removeIndex, 1);
+    saveData();
     return res.json({ removed: confessionId });
   }
 
   removeIndex = pendingConfessions.findIndex(item => item.id === confessionId);
   if (removeIndex >= 0) {
     pendingConfessions.splice(removeIndex, 1);
+    saveData();
     return res.json({ removed: confessionId });
   }
 
@@ -210,6 +253,7 @@ app.post('/api/visit', (req, res) => {
   analytics.visits += 1;
   activeVisitors.set(clientId, Date.now());
   analytics.activeVisitors = activeVisitors.size;
+  saveData();
 
   res.json({ status: 'ok', visits: analytics.visits, uniqueVisitors: analytics.uniqueVisitors, activeVisitors: analytics.activeVisitors });
 });

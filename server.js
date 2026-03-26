@@ -1,5 +1,6 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -9,11 +10,17 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const DATA_FILE = path.join(__dirname, 'data.json');
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  credentials: true
+}));
 app.use(bodyParser.json());
+app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'gietAdmin123';
+const SESSION_TIMEOUT = 3600000; // 1 hour
+const LOGIN_RATE_LIMIT = new Map(); // ip -> { count, resetTime }
 const abusiveWords = ['fuck', 'shit', 'bitch', 'asshole', 'cunt', 'dick', 'piss', 'slut'];
 
 let confessions = [];
@@ -21,6 +28,48 @@ let pendingConfessions = [];
 let analytics = { visits: 0, uniqueVisitors: 0, activeVisitors: 0 };
 let uniqueByClient = new Set();
 let activeVisitors = new Map(); // clientId -> lastHeartbeat timestamp
+let adminSessions = new Map(); // token -> { expiresAt, createdAt }
+
+function isValidSession(token) {
+  if (!token || !adminSessions.has(token)) return false;
+  const session = adminSessions.get(token);
+  if (session.expiresAt < Date.now()) {
+    adminSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function cleanupExpiredSessions() {
+  const now = Date.now();
+  for (const [token, session] of adminSessions.entries()) {
+    if (session.expiresAt < now) {
+      adminSessions.delete(token);
+    }
+  }
+}
+
+function getClientIp(req) {
+  return req.ip || req.connection.remoteAddress || req.socket.remoteAddress;
+}
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  if (!LOGIN_RATE_LIMIT.has(ip)) {
+    LOGIN_RATE_LIMIT.set(ip, { count: 1, resetTime: now + 60000 }); // 1 min window
+    return true;
+  }
+  const record = LOGIN_RATE_LIMIT.get(ip);
+  if (now > record.resetTime) {
+    record.count = 1;
+    record.resetTime = now + 60000;
+    return true;
+  }
+  record.count += 1;
+  return record.count <= 5; // max 5 attempts per minute
+}
+
+setInterval(cleanupExpiredSessions, 60000); // cleanup every minute
 
 function loadData() {
   try {
@@ -184,17 +233,37 @@ app.get('/api/pending', (req, res) => {
 });
 
 app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    return res.json({ token: 'admintoken', message: 'OK' });
+  const clientIp = getClientIp(req);
+  
+  if (!checkLoginRateLimit(clientIp)) {
+    return res.status(429).json({ error: 'Too many login attempts. Try again in 1 minute.' });
   }
-  return res.status(403).json({ error: 'Invalid password' });
+
+  const { password } = req.body;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(403).json({ error: 'Invalid password' });
+  }
+
+  const token = uuidv4();
+  const expiresAt = Date.now() + SESSION_TIMEOUT;
+  adminSessions.set(token, { expiresAt, createdAt: Date.now() });
+
+  res.cookie('admin_token', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: SESSION_TIMEOUT
+  });
+
+  return res.json({ message: 'OK', expiresIn: SESSION_TIMEOUT / 1000 });
 });
 
 app.post('/api/admin/moderate', (req, res) => {
-  const { token, confessionId, action } = req.body;
-  if (token !== 'admintoken') {
-    return res.status(403).json({ error: 'Invalid token' });
+  const token = req.cookies.admin_token;
+  const { confessionId, action } = req.body;
+  
+  if (!isValidSession(token)) {
+    return res.status(403).json({ error: 'Unauthorized. Please login again.' });
   }
 
   const idx = pendingConfessions.findIndex(item => item.id === confessionId);
@@ -219,9 +288,11 @@ app.post('/api/admin/moderate', (req, res) => {
 });
 
 app.post('/api/admin/delete', (req, res) => {
-  const { token, confessionId } = req.body;
-  if (token !== 'admintoken') {
-    return res.status(403).json({ error: 'Invalid token' });
+  const token = req.cookies.admin_token;
+  const { confessionId } = req.body;
+  
+  if (!isValidSession(token)) {
+    return res.status(403).json({ error: 'Unauthorized. Please login again.' });
   }
 
   let removeIndex = confessions.findIndex(c => c.id === confessionId);

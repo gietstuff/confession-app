@@ -13,7 +13,8 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 // ✅ FIX 1: CORS now accepts the Vercel frontend URL (set via env var)
 // Also allows localhost for local dev.
 const allowedOrigins = [
-  process.env.CLIENT_URL,          // e.g. https://giet-confession.vercel.app
+  process.env.CLIENT_URL,
+  'https://page-confession.vercel.app',  // your Vercel frontend
   'http://localhost:3000',
   'http://localhost:5000',
 ].filter(Boolean);

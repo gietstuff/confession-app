@@ -116,13 +116,7 @@ loadData();
 
 function sanitizeText(text) {
   if (!text || typeof text !== 'string') return '';
-  let filtered = text.trim().slice(0, 4000);
-  filtered = filtered.replace(/\d+/g, '');
-  abusiveWords.forEach(word => {
-    const re = new RegExp(word, 'gi');
-    filtered = filtered.replace(re, '***');
-  });
-  return filtered;
+  return text.trim().slice(0, 4000);
 }
 
 function hasAbusive(text) {

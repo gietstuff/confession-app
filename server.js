@@ -31,7 +31,6 @@ app.use(cors({
 
 app.use(bodyParser.json());
 app.use(cookieParser());
-app.use(express.static(path.join(__dirname, 'public')));
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'gietAdmin123';
 const SESSION_TIMEOUT = 3600000; // 1 hour
@@ -342,15 +341,6 @@ app.post('/api/admin/delete', (req, res) => {
   }
 
   res.status(404).json({ error: 'Confession not found' });
-});
-
-// Serve frontend (only used when frontend is served from same origin as backend)
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
-});
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, () => {

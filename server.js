@@ -25,21 +25,11 @@ try {
 // ══════════════════════════════════════════════════════════════════════════════
 // CONTENT FILTER ENGINE  (rule-based only — free, instant, no external calls)
 // ══════════════════════════════════════════════════════════════════════════════
-
-// Phone numbers: Indian 10-digit, +91 prefix, international
-const PHONE_RE = /(\+?91[\s\-]?)?[6-9]\d{9}/g;
-
-// Email addresses
-const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-
-// Social handles: @username
+const PHONE_RE  = /(\+?91[\s\-]?)?[6-9]\d{9}/g;
+const EMAIL_RE  = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 const HANDLE_RE = /@[a-zA-Z0-9_.]{2,}/g;
+const LINK_RE   = /https?:\/\/[^\s]+/gi;
 
-// URLs / links
-const LINK_RE = /https?:\/\/[^\s]+/gi;
-
-// ── Abusive words — English + Hindi/Hinglish ─────────────────────────────────
-// Add more words to either list at any time — they auto-compile into the regex
 const ABUSE_EN = [
   'fuck','fucking','fucked','fucker','fucks','bitch','bitches','shit','shitty',
   'asshole','bastard','cunt','dick','cock','pussy','whore','slut',
@@ -52,19 +42,12 @@ const ABUSE_HI = [
   'saala','saali','gadha','gandu','jhant','lund','chut','bhosdi',
   'maderchod','bhencho','kutte','kutiya','chodu','chod','chodna','choda',
 ];
-
 const ABUSE_RE = new RegExp(
   '(?<![a-zA-Z])(' +
-  [...ABUSE_EN, ...ABUSE_HI]
-    .sort((a,b) => b.length - a.length)            // longer phrases first
-    .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('|') +
-  ')(?![a-zA-Z])',
-  'gi'
+  [...ABUSE_EN, ...ABUSE_HI].sort((a,b)=>b.length-a.length)
+    .map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') +
+  ')(?![a-zA-Z])', 'gi'
 );
-
-// ── Common Indian first names ─────────────────────────────────────────────────
-// These get replaced with [Name] — add names specific to your college freely
 const COMMON_NAMES = [
   'aarav','aditya','akash','akshay','amit','amitesh','ananya','anjali','ankit',
   'ankita','arjun','aryan','ashish','bhavya','deepak','deepika','devansh',
@@ -77,59 +60,22 @@ const COMMON_NAMES = [
   'sourav','sumit','suraj','tanvi','tushar','udit','vaibhav','vandana',
   'vibhav','vikash','vikas','vishal','yash','yashasvi','zara',
 ];
-const NAME_RE = new RegExp(
-  '\\b(' + COMMON_NAMES.join('|') + ')\\b',
-  'gi'
-);
+const NAME_RE = new RegExp('\\b(' + COMMON_NAMES.join('|') + ')\\b', 'gi');
 
-// Blur: first char + asterisks + last char  →  "fuck" becomes "f**k"
 function blurWord(word) {
   if (word.length <= 2) return '*'.repeat(word.length);
   return word[0] + '*'.repeat(word.length - 2) + word[word.length - 1];
 }
-
-// ── Main filter function ──────────────────────────────────────────────────────
-// Returns { cleanText, flags, wasEdited }
-// flags: string[] — list of what was found, shown as badges in admin panel
 function filterConfession(rawText) {
-  const flags = [];
-  let text = rawText;
-
-  // 1. Links
-  if (LINK_RE.test(text)) { flags.push('link'); text = text.replace(LINK_RE, '[link removed]'); }
-  LINK_RE.lastIndex = 0;
-
-  // 2. Phone numbers
-  if (PHONE_RE.test(text)) { flags.push('phone'); text = text.replace(PHONE_RE, '[number hidden]'); }
-  PHONE_RE.lastIndex = 0;
-
-  // 3. Emails
-  if (EMAIL_RE.test(text)) { flags.push('email'); text = text.replace(EMAIL_RE, '[email hidden]'); }
-
-  // 4. Social handles
-  if (HANDLE_RE.test(text)) { flags.push('handle'); text = text.replace(HANDLE_RE, '[handle hidden]'); }
-
-  // 5. Abusive words — blur but keep the confession
-  if (ABUSE_RE.test(text)) {
-    flags.push('abuse');
-    text = text.replace(ABUSE_RE, m => blurWord(m));
-  }
-  ABUSE_RE.lastIndex = 0;
-
-  // 6. Names — replace with [Name], note it was edited
-  if (NAME_RE.test(text)) {
-    flags.push('name');
-    text = text.replace(NAME_RE, '[Name]');
-  }
-  NAME_RE.lastIndex = 0;
-
-  return {
-    cleanText: text,
-    flags,
-    wasEdited: text !== rawText,
-  };
+  const flags = []; let text = rawText;
+  if (LINK_RE.test(text))   { flags.push('link');   text = text.replace(LINK_RE,   '[link removed]');   } LINK_RE.lastIndex=0;
+  if (PHONE_RE.test(text))  { flags.push('phone');  text = text.replace(PHONE_RE,  '[number hidden]');  } PHONE_RE.lastIndex=0;
+  if (EMAIL_RE.test(text))  { flags.push('email');  text = text.replace(EMAIL_RE,  '[email hidden]');   }
+  if (HANDLE_RE.test(text)) { flags.push('handle'); text = text.replace(HANDLE_RE, '[handle hidden]');  }
+  if (ABUSE_RE.test(text))  { flags.push('abuse');  text = text.replace(ABUSE_RE,  m=>blurWord(m));     } ABUSE_RE.lastIndex=0;
+  if (NAME_RE.test(text))   { flags.push('name');   text = text.replace(NAME_RE,   '[Name]');           } NAME_RE.lastIndex=0;
+  return { cleanText: text, flags, wasEdited: text !== rawText };
 }
-
 
 // ── MongoDB ───────────────────────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI;
@@ -138,7 +84,7 @@ let confCol, pendingCol, analyticsCol, uniqueCol, repliesCol, settingsCol, pushS
 async function connectDB() {
   const client = new MongoClient(MONGO_URI);
   await client.connect();
-  const db   = client.db('giet_confession');
+  const db = client.db('giet_confession');
   confCol      = db.collection('confessions');
   pendingCol   = db.collection('pending');
   analyticsCol = db.collection('analytics');
@@ -162,7 +108,6 @@ const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5000',
 ].filter(Boolean);
-
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
@@ -188,23 +133,58 @@ function isValidSession(token) {
 }
 function checkLoginRateLimit(ip) {
   const now = Date.now();
-  if (!LOGIN_RATE_LIMIT.has(ip)) { LOGIN_RATE_LIMIT.set(ip, { count: 1, resetTime: now + 60000 }); return true; }
+  if (!LOGIN_RATE_LIMIT.has(ip)) { LOGIN_RATE_LIMIT.set(ip, { count: 1, resetTime: now+60000 }); return true; }
   const r = LOGIN_RATE_LIMIT.get(ip);
-  if (now > r.resetTime) { r.count = 1; r.resetTime = now + 60000; return true; }
+  if (now > r.resetTime) { r.count = 1; r.resetTime = now+60000; return true; }
   return ++r.count <= 5;
 }
 setInterval(() => { const now=Date.now(); for(const[t,s]of adminSessions.entries())if(s.expiresAt<now)adminSessions.delete(t); }, 60000);
-async function cleanupOld() {
-  const cutoff = Date.now() - 24 * 3600 * 1000;
-  await confCol.deleteMany({ createdAt: { $lt: cutoff } });
+
+// ── Feature 3: Keep last 200 confessions instead of 24h expiry ───────────────
+const MAX_CONFESSIONS = 200;
+async function enforceConfessionLimit() {
+  const total = await confCol.countDocuments({});
+  if (total > MAX_CONFESSIONS) {
+    // Find the oldest beyond limit and delete them + their replies
+    const toDelete = await confCol
+      .find({}, { projection: { id: 1 } })
+      .sort({ createdAt: 1 })
+      .limit(total - MAX_CONFESSIONS)
+      .toArray();
+    const ids = toDelete.map(d => d.id);
+    await confCol.deleteMany({ id: { $in: ids } });
+    await repliesCol.deleteMany({ confessionId: { $in: ids } });
+    console.log(`Pruned ${ids.length} old confession(s) to stay under ${MAX_CONFESSIONS}`);
+  }
+}
+// Also remove the old 24h pending cleanup — keep pending indefinitely until moderated
+async function cleanupOldPending() {
+  const cutoff = Date.now() - 7 * 24 * 3600 * 1000; // 7 days for pending
   await pendingCol.deleteMany({ createdAt: { $lt: cutoff } });
 }
-function cleanupActiveVisitors() {
-  const cutoff = Date.now() - 30000;
-  for (const [id, ts] of activeVisitors.entries()) if (ts < cutoff) activeVisitors.delete(id);
+setInterval(cleanupOldPending, 60 * 60 * 1000); // hourly
+
+// ── Feature 4: Confession of the Day ─────────────────────────────────────────
+// Cached in memory, refreshed every 24h
+let cotdCache = { id: null, refreshedAt: 0 };
+async function getConfessionOfTheDay() {
+  const now = Date.now();
+  if (cotdCache.id && (now - cotdCache.refreshedAt) < 24 * 3600 * 1000) {
+    return cotdCache.id;
+  }
+  // Find the confession with the most likes in the last 7 days
+  const cutoff = now - 7 * 24 * 3600 * 1000;
+  const top = await confCol
+    .find({ createdAt: { $gte: cutoff }, likes: { $gt: 0 } })
+    .sort({ likes: -1 })
+    .limit(1)
+    .toArray();
+  if (top.length) {
+    cotdCache = { id: top[0].id, refreshedAt: now };
+    return top[0].id;
+  }
+  return null;
 }
-setInterval(cleanupOld, 10 * 60 * 1000);
-setInterval(cleanupActiveVisitors, 5000);
 
 // ── Push helper ───────────────────────────────────────────────────────────────
 async function pushAll(payload, type = 'user') {
@@ -223,12 +203,8 @@ async function pushAll(payload, type = 'user') {
 // PUBLIC ROUTES
 // ═════════════════════════════════════════════════════════════════════════════
 
-// VAPID public key
-app.get('/api/push/vapid-public-key', (req, res) => {
-  res.json({ key: process.env.VAPID_PUBLIC_KEY || '' });
-});
+app.get('/api/push/vapid-public-key', (req, res) => res.json({ key: process.env.VAPID_PUBLIC_KEY || '' }));
 
-// Subscribe (user)
 app.post('/api/push/subscribe', async (req, res) => {
   const { subscription } = req.body;
   if (!subscription?.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
@@ -239,43 +215,55 @@ app.post('/api/push/subscribe', async (req, res) => {
   );
   res.json({ status: 'ok' });
 });
-
 app.post('/api/push/unsubscribe', async (req, res) => {
   const { endpoint } = req.body;
   if (endpoint) await pushSubCol.deleteOne({ endpoint });
   res.json({ status: 'ok' });
 });
 
-// Submit confession
+// Submit confession — Feature 1: branch tag added
 app.post('/api/confessions', async (req, res) => {
-  const { message, clientId, category } = req.body;
+  const { message, clientId, category, branch } = req.body;
   if (!message || !message.trim()) return res.status(400).json({ error: 'Message cannot be empty.' });
   if (message.trim().split(/\s+/).filter(Boolean).length > 400)
     return res.status(400).json({ error: 'Message exceeds 400 words.' });
 
-  // ── Run content filter (free, instant, no external calls) ────────────────
   const { cleanText, flags, wasEdited } = filterConfession(message.trim());
+
+  // Validate branch tag (optional)
+  const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
+  const VALID_BRANCHES = ['CSE','AIML','ECE','AGRI','Others'];
+  let branchTag = null;
+  if (branch && branch.year && branch.branch) {
+    if (VALID_YEARS.includes(branch.year) && VALID_BRANCHES.includes(branch.branch)) {
+      branchTag = { year: branch.year, branch: branch.branch };
+    }
+  }
 
   const settings = await settingsCol.findOne({ _id: 'main' });
   const autoApprove = settings?.autoApprove || false;
 
   const confession = {
     id: uuidv4(),
-    message: cleanText,                                          // always the cleaned version
-    originalMessage: wasEdited ? message.trim() : undefined,    // store original for admin reference
+    message: cleanText,
+    originalMessage: wasEdited ? message.trim() : undefined,
     category: category || '💭 Random',
+    branchTag,                    // ← Feature 1: null if not provided
     createdAt: Date.now(),
     likes: 0, dislikes: 0, votes: {},
+    reactions: { '❤️':0, '😮':0, '😂':0, '🥺':0, '🔥':0 },  // ← Feature 5
+    reactedBy: {},                // clientId → emoji
     approved: autoApprove,
     flags: 0, flaggedBy: [],
-    filterFlags: flags,       // shown as coloured badges in admin panel
-    wasEdited,                // shows ✏️ "auto-cleaned" note in admin panel
+    filterFlags: flags,
+    wasEdited,
   };
 
   if (autoApprove) {
     await confCol.insertOne(confession);
+    await enforceConfessionLimit();
     pushAll({ title: '💌 New Confession on GIET!',
-      body: cleanText.slice(0, 90) + (cleanText.length > 90 ? '…' : ''),
+      body: cleanText.slice(0,90) + (cleanText.length>90?'…':''),
       url: 'https://page-confession.vercel.app' }, 'user').catch(()=>{});
   } else {
     await pendingCol.insertOne(confession);
@@ -291,23 +279,25 @@ app.post('/api/confessions', async (req, res) => {
       await analyticsCol.updateOne({ _id: 'main' }, { $inc: { uniqueVisitors: 1 } });
     }
   }
-
-  // Tell the submitter if their message was edited — honest + transparent
-  return res.json({
-    status: autoApprove ? 'approved' : 'pending',
-    edited: wasEdited,
-    editedFields: flags,
-  });
+  return res.json({ status: autoApprove ? 'approved' : 'pending', edited: wasEdited, editedFields: flags });
 });
 
-// Get approved confessions
+// Get approved confessions — Feature 3: last 200, Feature 4: COTD pinned first
 app.get('/api/confessions', async (req, res) => {
-  const cutoff = Date.now() - 24 * 3600 * 1000;
-  const data = await confCol.find({ createdAt: { $gte: cutoff } }).sort({ createdAt: -1 }).toArray();
+  const data = await confCol.find({}).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
+  const cotdId = await getConfessionOfTheDay();
+  // Attach cotd flag
+  data.forEach(c => { c.isConfessionOfDay = (c.id === cotdId); });
+  // Pin COTD to top
+  data.sort((a, b) => {
+    if (a.isConfessionOfDay) return -1;
+    if (b.isConfessionOfDay) return 1;
+    return b.createdAt - a.createdAt;
+  });
   res.json(data);
 });
 
-// Like / Dislike
+// Like / Dislike (kept for compatibility)
 app.post('/api/like/:id', async (req, res) => {
   const { clientId } = req.body;
   if (!clientId) return res.status(400).json({ error: 'clientId required' });
@@ -333,15 +323,43 @@ app.post('/api/dislike/:id', async (req, res) => {
   res.json({ likes: u.likes, dislikes: u.dislikes });
 });
 
+// Feature 5: Emoji reactions endpoint
+app.post('/api/react/:id', async (req, res) => {
+  const { clientId, emoji } = req.body;
+  const VALID_EMOJIS = ['❤️','😮','😂','🥺','🔥'];
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!VALID_EMOJIS.includes(emoji)) return res.status(400).json({ error: 'Invalid emoji' });
+
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+
+  const prevReaction = item.reactedBy?.[clientId];
+  const upd = {};
+
+  if (prevReaction === emoji) {
+    // Toggle off — remove reaction
+    upd.$inc = { [`reactions.${emoji}`]: -1 };
+    upd.$unset = { [`reactedBy.${clientId}`]: '' };
+  } else {
+    upd.$inc = { [`reactions.${emoji}`]: 1 };
+    upd.$set = { [`reactedBy.${clientId}`]: emoji };
+    if (prevReaction) upd.$inc[`reactions.${prevReaction}`] = -1;
+  }
+
+  await confCol.updateOne({ id: req.params.id }, upd);
+  const u = await confCol.findOne({ id: req.params.id });
+  res.json({ reactions: u.reactions, myReaction: u.reactedBy?.[clientId] || null });
+});
+
 // Flag
 app.post('/api/flag/:id', async (req, res) => {
   const { clientId } = req.body;
   if (!clientId) return res.status(400).json({ error: 'clientId required' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
-  if ((item.flaggedBy || []).includes(clientId)) return res.json({ flags: item.flags, alreadyFlagged: true });
+  if ((item.flaggedBy||[]).includes(clientId)) return res.json({ flags: item.flags, alreadyFlagged: true });
   await confCol.updateOne({ id: req.params.id }, { $inc: { flags: 1 }, $push: { flaggedBy: clientId } });
-  res.json({ flags: (item.flags || 0) + 1 });
+  res.json({ flags: (item.flags||0)+1 });
 });
 
 // Replies
@@ -359,8 +377,6 @@ app.post('/api/replies/:confessionId', async (req, res) => {
   await repliesCol.insertOne(reply);
   res.json({ status: 'ok', reply });
 });
-
-// Bulk reply counts — POST /api/replies/counts { ids: [...] }
 app.post('/api/replies/counts', async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids must be array' });
@@ -395,22 +411,20 @@ app.post('/api/visit', async (req, res) => {
   activeVisitors.set(clientId, Date.now());
   await analyticsCol.updateOne({ _id: 'main' }, { $set: { activeVisitors: activeVisitors.size } });
   const stats = await analyticsCol.findOne({ _id: 'main' });
-  res.json({ status: 'ok', visits: stats.visits, uniqueVisitors: stats.uniqueVisitors, activeVisitors: activeVisitors.size });
+  res.json({ status:'ok', visits: stats.visits, uniqueVisitors: stats.uniqueVisitors, activeVisitors: activeVisitors.size });
 });
 app.get('/api/analytics', async (req, res) => {
   const stats = await analyticsCol.findOne({ _id: 'main' });
-  res.json({ visits: stats?.visits || 0, uniqueVisitors: stats?.uniqueVisitors || 0, activeVisitors: activeVisitors.size });
+  res.json({ visits: stats?.visits||0, uniqueVisitors: stats?.uniqueVisitors||0, activeVisitors: activeVisitors.size });
 });
 app.get('/api/settings', async (req, res) => {
   const s = await settingsCol.findOne({ _id: 'main' });
-  res.json({ autoApprove: s?.autoApprove || false });
+  res.json({ autoApprove: s?.autoApprove||false });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ADMIN ROUTES
 // ═════════════════════════════════════════════════════════════════════════════
-
-// Admin push subscribe
 app.post('/api/admin/push/subscribe', async (req, res) => {
   const token = req.cookies.admin_token || req.headers['x-admin-token'];
   if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
@@ -429,9 +443,9 @@ app.post('/api/admin/login', (req, res) => {
   if (!checkLoginRateLimit(ip)) return res.status(429).json({ error: 'Too many attempts. Try again in 1 minute.' });
   if (req.body.password !== ADMIN_PASSWORD) return res.status(403).json({ error: 'Invalid password' });
   const token = uuidv4();
-  adminSessions.set(token, { expiresAt: Date.now() + SESSION_TIMEOUT });
-  res.cookie('admin_token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: SESSION_TIMEOUT });
-  return res.json({ message: 'OK', token, expiresIn: SESSION_TIMEOUT / 1000 });
+  adminSessions.set(token, { expiresAt: Date.now()+SESSION_TIMEOUT });
+  res.cookie('admin_token', token, { httpOnly:true, secure:true, sameSite:'none', maxAge:SESSION_TIMEOUT });
+  return res.json({ message:'OK', token, expiresIn: SESSION_TIMEOUT/1000 });
 });
 
 app.post('/api/admin/moderate', async (req, res) => {
@@ -445,8 +459,9 @@ app.post('/api/admin/moderate', async (req, res) => {
     rest.approved = true;
     await confCol.insertOne(rest);
     await pendingCol.deleteOne({ id: confessionId });
+    await enforceConfessionLimit();
     pushAll({ title: '💌 New Confession on GIET!',
-      body: rest.message.slice(0, 90) + (rest.message.length > 90 ? '…' : ''),
+      body: rest.message.slice(0,90)+(rest.message.length>90?'…':''),
       url: 'https://page-confession.vercel.app' }, 'user').catch(()=>{});
     return res.json({ updated: rest });
   }
@@ -465,7 +480,8 @@ app.post('/api/admin/approve-all', async (req, res) => {
   const toInsert = pending.map(({ _id, ...rest }) => ({ ...rest, approved: true }));
   await confCol.insertMany(toInsert);
   await pendingCol.deleteMany({});
-  pushAll({ title: `💌 ${pending.length} New Confession${pending.length > 1 ? 's' : ''} on GIET!`,
+  await enforceConfessionLimit();
+  pushAll({ title: `💌 ${pending.length} New Confession${pending.length>1?'s':''} on GIET!`,
     body: 'Fresh confessions just dropped — come check them out!',
     url: 'https://page-confession.vercel.app' }, 'user').catch(()=>{});
   res.json({ approved: pending.length });
@@ -475,7 +491,7 @@ app.post('/api/admin/auto-approve', async (req, res) => {
   const token = req.cookies.admin_token || req.headers['x-admin-token'];
   if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
   const { enabled } = req.body;
-  await settingsCol.updateOne({ _id: 'main' }, { $set: { autoApprove: !!enabled } });
+  await settingsCol.updateOne({ _id:'main' }, { $set: { autoApprove: !!enabled } });
   res.json({ autoApprove: !!enabled });
 });
 

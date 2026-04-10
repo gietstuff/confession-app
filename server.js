@@ -152,9 +152,9 @@ const apiLimiter = rateLimit({
   standardHeaders: true, legacyHeaders: false,
   message: { error: 'Too many requests.' },
 });
-// Confession submit: 5 per hour per IP
+// Confession submit: 10 per hour per IP (raised from 5 — allows legitimate testing)
 const confessionLimiter = rateLimit({
-  windowMs: 60*60*1000, max: 5,
+  windowMs: 60*60*1000, max: 10,
   standardHeaders: true, legacyHeaders: false,
   message: { error: 'Too many submissions. Try again in an hour.' },
 });

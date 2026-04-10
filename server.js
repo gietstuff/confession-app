@@ -99,9 +99,11 @@ async function connectDB() {
   repliesCol=db.collection('replies'); settingsCol=db.collection('settings');
   pushSubCol=db.collection('push_subscriptions');
   console.log('MongoDB connected');
-  await analyticsCol.updateOne({_id:'main'},{$setOnInsert:{visits:0,uniqueVisitors:0,activeVisitors:0}},{upsert:true});
+  await analyticsCol.updateOne({_id:'main'},{$setOnInsert:{visits:0,uniqueVisitors:0}},{upsert:true});
   await settingsCol.updateOne({_id:'main'},{$setOnInsert:{autoApprove:false}},{upsert:true});
   await pushSubCol.createIndex({endpoint:1},{unique:true});
+  // Index for fast "active visitors in last 60s" count query
+  await uniqueCol.createIndex({ lastSeen: 1 });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -172,8 +174,22 @@ const interactionLimiter = rateLimit({
   standardHeaders: true, legacyHeaders: false,
   message: { error: 'Too many interactions.' },
 });
+// Visit ping: 1 per 20 seconds per IP — enough for the 15s frontend interval
+// Applied ONLY to /api/visit so it never consumes the global 100/15min budget
+const visitLimiter = rateLimit({
+  windowMs: 20*1000, max: 1,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many pings.' },
+  skip: () => false,
+});
 
-app.use('/api/', apiLimiter);
+// Global limiter applied to ALL /api/ routes EXCEPT /api/visit
+// (visit has its own limiter and needs to stay reliable for stats)
+app.use('/api/', (req, res, next) => {
+  if (req.path === '/visit') return next(); // skip global for visit
+  return apiLimiter(req, res, next);
+});
+app.use('/api/visit', visitLimiter);
 app.use('/api/confessions', confessionLimiter);
 app.use('/api/admin/login', adminLoginLimiter);
 app.use('/api/react', interactionLimiter);
@@ -185,7 +201,7 @@ app.use('/api/replies', interactionLimiter);
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 const SESSION_TIMEOUT = 3600000;
 const adminSessions   = new Map();
-const activeVisitors  = new Map();
+// Note: activeVisitors is now DB-backed (unique_visitors.lastSeen), not in-memory
 function isValidSession(token) {
   if (!token || !adminSessions.has(token)) return false;
   const s = adminSessions.get(token);
@@ -207,7 +223,8 @@ function requireAdmin(req, res, next) {
 }
 
 setInterval(() => { const now=Date.now(); for(const[t,s]of adminSessions.entries())if(s.expiresAt<now)adminSessions.delete(t); }, 60000);
-setInterval(() => { const cutoff=Date.now()-30000; for(const[id,ts]of activeVisitors.entries())if(ts<cutoff)activeVisitors.delete(id); }, 5000);
+// activeVisitors is now tracked in MongoDB (unique_visitors collection) via lastSeen field.
+// No more in-memory Map — survives cold starts.
 
 // ── Push helper ───────────────────────────────────────────────────────────────
 async function pushAll(payload, type='user') {
@@ -407,27 +424,44 @@ app.post('/api/replies/counts', async (req, res) => {
   res.json(map);
 });
 
-// Visit
+// Visit — tracks unique visitors + active users
+// activeVisitors = count of unique_visitors with lastSeen within last 60 seconds
+// Stored in MongoDB so it survives Render cold starts
 app.post('/api/visit', async (req, res) => {
   const { clientId } = req.body;
   if (!clientId||typeof clientId!=='string'||clientId.length>100)
     return res.status(400).json({ error:'clientId required' });
-  const exists = await uniqueCol.findOne({ _id:clientId });
-  if (!exists) {
-    await uniqueCol.insertOne({ _id:clientId });
+
+  const now = Date.now();
+  const existing = await uniqueCol.findOne({ _id:clientId });
+  if (!existing) {
+    // Brand new visitor
+    await uniqueCol.insertOne({ _id:clientId, firstSeen:now, lastSeen:now });
     await analyticsCol.updateOne({_id:'main'},{$inc:{visits:1,uniqueVisitors:1}});
+  } else {
+    // Returning visitor — just update lastSeen
+    await uniqueCol.updateOne({ _id:clientId }, { $set:{ lastSeen:now } });
   }
-  activeVisitors.set(clientId, Date.now());
-  await analyticsCol.updateOne({_id:'main'},{$set:{activeVisitors:activeVisitors.size}});
+
+  // Count active: any visitor whose lastSeen is within last 60 seconds
+  const activeCutoff = now - 60000;
+  const activeCount = await uniqueCol.countDocuments({ lastSeen:{ $gte: activeCutoff } });
+
   const stats = await analyticsCol.findOne({_id:'main'});
-  res.json({ status:'ok', visits:stats.visits, uniqueVisitors:stats.uniqueVisitors, activeVisitors:activeVisitors.size });
+  res.json({
+    status:'ok',
+    visits: stats?.visits || 0,
+    uniqueVisitors: stats?.uniqueVisitors || 0,
+    activeVisitors: activeCount,
+  });
 });
 
-// [SECURITY-7] Analytics and settings now require admin auth.
-// Previously anyone could call GET /api/analytics and see visitor data.
+// [SECURITY-7] Analytics require admin auth.
 app.get('/api/analytics', requireAdmin, async (req, res) => {
   const stats = await analyticsCol.findOne({_id:'main'});
-  res.json({ visits:stats?.visits||0, uniqueVisitors:stats?.uniqueVisitors||0, activeVisitors:activeVisitors.size });
+  const activeCutoff = Date.now() - 60000;
+  const activeCount = await uniqueCol.countDocuments({ lastSeen:{ $gte: activeCutoff } });
+  res.json({ visits:stats?.visits||0, uniqueVisitors:stats?.uniqueVisitors||0, activeVisitors:activeCount });
 });
 app.get('/api/settings', requireAdmin, async (req, res) => {
   const s = await settingsCol.findOne({_id:'main'});

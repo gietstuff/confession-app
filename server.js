@@ -335,9 +335,11 @@ app.post('/api/confessions', async (req, res) => {
 });
 
 app.get('/api/confessions', async (req, res) => {
-  const cutoff = Date.now() - 24*3600*1000;
-  const data = await confCol.find({createdAt:{$gte:cutoff}}).sort({createdAt:-1}).toArray();
-  res.json(data);
+  // No time filter — keep-last-200 pruning handles the size cap
+  // Returns newest 200, sorted newest first
+  const data = await confCol.find({}).sort({createdAt:-1}).limit(200).toArray();
+  const settings = await settingsCol.findOne({_id:'main'});
+  res.json({ confessions: data, cotdId: settings?.cotdId || null });
 });
 
 // Like / Dislike / React

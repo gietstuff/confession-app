@@ -159,18 +159,13 @@ async function connectDB() {
 const allowedOrigins = [
   process.env.CLIENT_URL,
   'https://page-confession.vercel.app',
-  'https://confession-app-frontend.vercel.app',
-  'https://confession-app-frontend-git-main-gietstuffs-projects.vercel.app',
   'http://localhost:3000',
   'http://localhost:5000',
 ].filter(Boolean);
 
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // allow non-browser (mobile, curl)
-    // Allow any *.vercel.app subdomain for this project — covers all preview URLs
-    if (origin.endsWith('.vercel.app') || allowedOrigins.includes(origin)) return cb(null, true);
-    console.warn('[CORS blocked]', origin);
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error('Not allowed by CORS'));
   },
   credentials: true
@@ -200,18 +195,9 @@ function checkLoginRateLimit(ip) {
 }
 setInterval(() => { const now=Date.now(); for(const[t,s]of adminSessions.entries())if(s.expiresAt<now)adminSessions.delete(t); }, 60000);
 async function cleanupOld() {
-  // Keep the newest 200 approved confessions — delete the rest
-  // Pending: only remove truly ancient ones (7 days) to avoid losing unreviewed
-  const approvedAll = await confCol.find({}, { projection: { _id: 1, createdAt: 1 } })
-    .sort({ createdAt: -1 }).toArray();
-  if (approvedAll.length > 200) {
-    const toDelete = approvedAll.slice(200).map(c => c._id);
-    await confCol.deleteMany({ _id: { $in: toDelete } });
-    console.log(`[cleanup] Trimmed ${toDelete.length} old confessions, keeping 200`);
-  }
-  // Pending: remove anything older than 7 days
-  const pendingCutoff = Date.now() - 7 * 24 * 3600 * 1000;
-  await pendingCol.deleteMany({ createdAt: { $lt: pendingCutoff } });
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  await confCol.deleteMany({ createdAt: { $lt: cutoff } });
+  await pendingCol.deleteMany({ createdAt: { $lt: cutoff } });
 }
 function cleanupActiveVisitors() {
   const cutoff = Date.now() - 30000;
@@ -273,17 +259,23 @@ app.post('/api/confessions', async (req, res) => {
   const settings = await settingsCol.findOne({ _id: 'main' });
   const autoApprove = settings?.autoApprove || false;
 
+  const { batch } = req.body; // optional: { year: '2nd', branch: 'CSE' }
   const confession = {
     id: uuidv4(),
-    message: cleanText,                                          // always the cleaned version
-    originalMessage: wasEdited ? message.trim() : undefined,    // store original for admin reference
+    message: cleanText,
+    originalMessage: wasEdited ? message.trim() : undefined,
     category: category || '💭 Random',
+    batch: batch || null,
     createdAt: Date.now(),
     likes: 0, dislikes: 0, votes: {},
     approved: autoApprove,
     flags: 0, flaggedBy: [],
-    filterFlags: flags,       // shown as coloured badges in admin panel
-    wasEdited,                // shows ✏️ "auto-cleaned" note in admin panel
+    filterFlags: flags,
+    wasEdited,
+    pollVotes: (category === '📊 Poll') ? [0, 0] : undefined,
+    pollVoters: (category === '📊 Poll') ? [] : undefined,
+    reactCounts: {},
+    reacts: {},
   };
 
   if (autoApprove) {
@@ -311,12 +303,14 @@ app.post('/api/confessions', async (req, res) => {
     status: autoApprove ? 'approved' : 'pending',
     edited: wasEdited,
     editedFields: flags,
+    confessionId: confession.id,
   });
 });
 
-// Get approved confessions — return newest 200, no time cutoff
+// Get approved confessions
 app.get('/api/confessions', async (req, res) => {
-  const data = await confCol.find({}).sort({ createdAt: -1 }).limit(200).toArray();
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  const data = await confCol.find({ createdAt: { $gte: cutoff } }).sort({ createdAt: -1 }).toArray();
   res.json(data);
 });
 
@@ -501,6 +495,46 @@ app.post('/api/admin/delete', async (req, res) => {
   const r2 = await pendingCol.deleteOne({ id: confessionId });
   if (r2.deletedCount) return res.json({ removed: confessionId });
   res.status(404).json({ error: 'Not found' });
+});
+
+
+// ── Reactions (5 emoji) ───────────────────────────────────────────────────────
+app.post('/api/react/:id', async (req, res) => {
+  const { clientId, emoji } = req.body;
+  const VALID = ['❤️','😂','😮','🥺','🔥'];
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!VALID.includes(emoji)) return res.status(400).json({ error: 'Invalid emoji' });
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  const key = `reacts.${clientId}`;
+  const prev = item.reacts?.[clientId];
+  const update = { $set: { [key]: emoji } };
+  if (!item.reacts) update.$set['reacts'] = { [clientId]: emoji };
+  // Decrement old, increment new
+  if (prev) {
+    update.$inc = { [`reactCounts.${prev}`]: -1, [`reactCounts.${emoji}`]: 1 };
+  } else {
+    update.$inc = { [`reactCounts.${emoji}`]: 1 };
+  }
+  await confCol.updateOne({ id: req.params.id }, update);
+  const updated = await confCol.findOne({ id: req.params.id });
+  res.json({ reactCounts: updated.reactCounts || {} });
+});
+
+// ── Poll vote ─────────────────────────────────────────────────────────────────
+app.post('/api/poll/:id', async (req, res) => {
+  const { clientId, option } = req.body; // option: 0 or 1
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (option !== 0 && option !== 1) return res.status(400).json({ error: 'Invalid option' });
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item || item.category !== '📊 Poll') return res.status(404).json({ error: 'Poll not found' });
+  if ((item.pollVoters || []).includes(clientId))
+    return res.json({ votes: item.pollVotes || [0,0], alreadyVoted: true });
+  const votes = item.pollVotes || [0, 0];
+  votes[option] = (votes[option] || 0) + 1;
+  await confCol.updateOne({ id: req.params.id },
+    { $set: { pollVotes: votes }, $push: { pollVoters: clientId } });
+  res.json({ votes });
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

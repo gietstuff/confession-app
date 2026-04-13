@@ -102,7 +102,7 @@ async function connectDB() {
   // TTL index on lastSeen: documents auto-expire after 90s
   // LEARN: MongoDB TTL index deletes docs automatically — "online now" = docs with recent lastSeen.
   // Survives Render cold starts (in-memory Map does not).
-  try { await uniqueCol.dropIndex('lastSeen_1'); } catch(e) {}  // drop old non-TTL index if exists
+  try { await uniqueCol.dropIndex('lastSeen_1'); } catch(e) {}
   await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90 });
 }
 
@@ -551,6 +551,17 @@ app.post('/api/admin/auto-approve', async (req, res) => {
   const { enabled } = req.body;
   await settingsCol.updateOne({ _id:'main' }, { $set: { autoApprove: !!enabled } });
   res.json({ autoApprove: !!enabled });
+});
+
+// Admin: delete a single reply
+app.post('/api/admin/reply/delete', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { replyId } = req.body;
+  if (!replyId) return res.status(400).json({ error: 'replyId required' });
+  const result = await repliesCol.deleteOne({ id: replyId });
+  if (!result.deletedCount) return res.status(404).json({ error: 'Reply not found' });
+  return res.json({ removed: replyId });
 });
 
 app.post('/api/admin/delete', async (req, res) => {

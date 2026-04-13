@@ -23,8 +23,15 @@ try {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CONTENT FILTER ENGINE  (rule-based only — free, instant, no external calls)
+// CONTENT FILTER ENGINE  v3 — AI-first, regex fallback
 // ══════════════════════════════════════════════════════════════════════════════
+// LEARN: We call Claude API (claude-haiku-4-5 — cheapest model) to understand
+// context. It catches things regex never could: nicknames, roll numbers written
+// as text, creative spellings of abuse words, indirect threats, etc.
+// If the API call fails (network, quota) we fall back to regex so the server
+// never goes down just because AI is unavailable.
+// ──────────────────────────────────────────────────────────────────────────────
+
 const PHONE_RE  = /(\+?91[\s\-]?)?[6-9]\d{9}/g;
 const EMAIL_RE  = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 const HANDLE_RE = /@[a-zA-Z0-9_.]{2,}/g;
@@ -66,7 +73,9 @@ function blurWord(word) {
   if (word.length <= 2) return '*'.repeat(word.length);
   return word[0] + '*'.repeat(word.length - 2) + word[word.length - 1];
 }
-function filterConfession(rawText) {
+
+// ── Regex-only fallback filter (used when AI is unavailable) ──
+function filterRegex(rawText) {
   const flags = []; let text = rawText;
   if (LINK_RE.test(text))   { flags.push('link');   text = text.replace(LINK_RE,   '[link removed]');   } LINK_RE.lastIndex=0;
   if (PHONE_RE.test(text))  { flags.push('phone');  text = text.replace(PHONE_RE,  '[number hidden]');  } PHONE_RE.lastIndex=0;
@@ -75,6 +84,91 @@ function filterConfession(rawText) {
   if (ABUSE_RE.test(text))  { flags.push('abuse');  text = text.replace(ABUSE_RE,  m=>blurWord(m));     } ABUSE_RE.lastIndex=0;
   if (NAME_RE.test(text))   { flags.push('name');   text = text.replace(NAME_RE,   '[Name]');           } NAME_RE.lastIndex=0;
   return { cleanText: text, flags, wasEdited: text !== rawText };
+}
+
+// ── AI filter using Claude API ──
+// LEARN: We use claude-haiku-4-5 (fastest, cheapest). We give it a strict JSON
+// schema to fill — this is called "structured output prompting". We tell it:
+// return ONLY JSON, no explanation. Then we parse it.
+// The model understands context: "Kh___" is a name hint, "2k22CS045" is a roll
+// number, "bc" in Hinglish context is abuse, etc.
+async function filterWithAI(rawText) {
+  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_KEY) throw new Error('No ANTHROPIC_API_KEY');
+
+  const prompt = `You are a content moderator for a college anonymous confession website (Indian college, GIET University).
+Your job: clean the message so no one can be identified or harassed.
+
+Rules:
+1. NAMES: Replace any real person's name (even partial like "Kh___" or "that girl from sec-F") with [Name]
+2. ROLL NUMBERS: Replace roll numbers, student IDs (e.g. 2k22CS045, 22EGCS001) with [roll hidden]  
+3. PHONE NUMBERS: Replace Indian phone numbers (10 digits, starting 6-9, or +91 prefix) with [number hidden]
+4. EMAILS/HANDLES: Replace emails and @handles with [contact hidden]
+5. LINKS: Replace URLs with [link removed]
+6. ABUSE: Blur abusive words (English and Hindi/Hinglish: fuck, chutiya, bsdk, mc, bc used as abuse, etc.) using asterisks like f**k
+7. SECTION/CLASS hints: If someone says "sec-F girl" or "that CSE-B guy" in a way that identifies a person, replace the identifying part with [section hidden]
+8. HARMLESS content: Do NOT flag normal words. "bc" meaning "because" is fine. Context matters.
+
+Respond ONLY with this JSON (no other text, no markdown):
+{
+  "cleanText": "<the cleaned message>",
+  "flags": ["name"|"roll"|"phone"|"email"|"handle"|"link"|"abuse"|"section"],
+  "wasEdited": true|false,
+  "aiReasoning": "<one sentence explaining what you changed and why, or 'No changes needed'>"
+}
+
+Message to clean:
+${rawText}`;
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+
+  if (!resp.ok) throw new Error(`AI API error: ${resp.status}`);
+  const data = await resp.json();
+  const raw = data.content?.[0]?.text || '';
+
+  // Strip markdown code fences if model adds them
+  const jsonStr = raw.replace(/```json\n?|```/g, '').trim();
+  const parsed = JSON.parse(jsonStr);
+
+  // Validate shape
+  if (!parsed.cleanText || typeof parsed.wasEdited !== 'boolean') {
+    throw new Error('Invalid AI response shape');
+  }
+
+  return {
+    cleanText: parsed.cleanText,
+    flags: Array.isArray(parsed.flags) ? parsed.flags : [],
+    wasEdited: parsed.wasEdited,
+    aiReasoning: parsed.aiReasoning || '',
+    usedAI: true
+  };
+}
+
+// ── Main filter — tries AI first, falls back to regex ──
+// LEARN: async/await means this returns a Promise. The caller must await it.
+// The "|| filterRegex(rawText)" fallback ensures the site never breaks if
+// the AI API is down or the key is missing.
+async function filterConfession(rawText) {
+  try {
+    const result = await filterWithAI(rawText);
+    console.log(`[AI filter] "${rawText.slice(0,40)}…" → flags: [${result.flags}] | ${result.aiReasoning}`);
+    return result;
+  } catch(err) {
+    console.warn('[AI filter] Failed, using regex fallback:', err.message);
+    return { ...filterRegex(rawText), usedAI: false, aiReasoning: 'AI unavailable — regex filter used' };
+  }
 }
 
 // ── MongoDB ───────────────────────────────────────────────────────────────────
@@ -102,8 +196,7 @@ async function connectDB() {
   // TTL index on lastSeen: documents auto-expire after 90s
   // LEARN: MongoDB TTL index deletes docs automatically — "online now" = docs with recent lastSeen.
   // Survives Render cold starts (in-memory Map does not).
-  try { await uniqueCol.dropIndex('lastSeen_1'); } catch(e) {}
-  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90 });
+  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90, background: true });
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -238,7 +331,7 @@ app.post('/api/confessions', async (req, res) => {
   if (rawMessage.split(/\s+/).filter(Boolean).length > 400)
     return res.status(400).json({ error: 'Message exceeds 400 words.' });
 
-  const { cleanText, flags, wasEdited } = filterConfession(rawMessage);
+  const { cleanText, flags, wasEdited, aiReasoning, usedAI } = await filterConfession(rawMessage);
 
   // Validate branch tag (optional)
   const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
@@ -267,6 +360,8 @@ app.post('/api/confessions', async (req, res) => {
     flags: 0, flaggedBy: [],
     filterFlags: flags,
     wasEdited,
+    aiReasoning: aiReasoning||'',
+    usedAI: !!usedAI,
     // ── Poll fields ──
     isPoll: !!isPoll,
     pollOptions: isPoll ? { a: (poll.optA||'Yes').slice(0,60), b: (poll.optB||'No').slice(0,60) } : null,
@@ -299,7 +394,8 @@ app.post('/api/confessions', async (req, res) => {
 
 // Get approved confessions — Feature 3: last 200, Feature 4: COTD pinned first
 app.get('/api/confessions', async (req, res) => {
-  const data = await confCol.find({}).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
+  // Exclude reportHidden confessions from public feed
+  const data = await confCol.find({ reportHidden: { $ne: true } }).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
   const cotdId = await getConfessionOfTheDay();
   // Attach cotd flag
   data.forEach(c => { c.isConfessionOfDay = (c.id === cotdId); });
@@ -553,17 +649,6 @@ app.post('/api/admin/auto-approve', async (req, res) => {
   res.json({ autoApprove: !!enabled });
 });
 
-// Admin: delete a single reply
-app.post('/api/admin/reply/delete', async (req, res) => {
-  const token = req.cookies.admin_token || req.headers['x-admin-token'];
-  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
-  const { replyId } = req.body;
-  if (!replyId) return res.status(400).json({ error: 'replyId required' });
-  const result = await repliesCol.deleteOne({ id: replyId });
-  if (!result.deletedCount) return res.status(404).json({ error: 'Reply not found' });
-  return res.json({ removed: replyId });
-});
-
 app.post('/api/admin/delete', async (req, res) => {
   const token = req.cookies.admin_token || req.headers['x-admin-token'];
   if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
@@ -579,3 +664,63 @@ app.post('/api/admin/delete', async (req, res) => {
 connectDB().then(() => {
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }).catch(err => { console.error('MongoDB connection failed:', err); process.exit(1); });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// COMMUNITY REPORT SYSTEM
+// LEARN: This gives users real power. Instead of just "flag" (which admins
+// may never see), users can report with a specific reason. When 3+ unique
+// users report the same confession, it gets auto-hidden from the feed and
+// moved to a special "reported" queue in the admin panel.
+// This is called "community moderation" — used by Reddit, Twitter, etc.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const REPORT_THRESHOLD = 3; // auto-hide after this many unique reports
+
+app.post('/api/report/:id', async (req, res) => {
+  const { clientId, reason } = req.body;
+  // reason options: 'identity' | 'harassment' | 'fake' | 'spam' | 'other'
+  const VALID_REASONS = ['identity', 'harassment', 'fake', 'spam', 'other'];
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!VALID_REASONS.includes(reason)) return res.status(400).json({ error: 'Invalid reason' });
+
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+
+  // Check if this client already reported
+  const alreadyReported = (item.reports||[]).some(r => r.clientId === clientId);
+  if (alreadyReported) return res.json({ alreadyReported: true, reportCount: item.reports.length });
+
+  // Add report
+  const report = { clientId, reason, reportedAt: Date.now() };
+  await confCol.updateOne({ id: req.params.id }, { $push: { reports: report } });
+
+  // Fetch updated doc
+  const updated = await confCol.findOne({ id: req.params.id });
+  const reportCount = updated.reports.length;
+
+  // Auto-hide if threshold reached
+  if (reportCount >= REPORT_THRESHOLD && !item.reportHidden) {
+    await confCol.updateOne({ id: req.params.id }, { $set: { reportHidden: true } });
+    console.log(`[Reports] Confession ${req.params.id} auto-hidden after ${reportCount} reports`);
+  }
+
+  res.json({ status: 'reported', reportCount, autoHidden: reportCount >= REPORT_THRESHOLD });
+});
+
+// Get reported confessions (admin only)
+app.get('/api/reported', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const data = await confCol.find({ 'reports.0': { $exists: true } })
+    .sort({ 'reports.length': -1, createdAt: -1 }).limit(100).toArray();
+  res.json(data);
+});
+
+// Restore a reported confession (admin clears reports and unhides)
+app.post('/api/admin/restore', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { confessionId } = req.body;
+  await confCol.updateOne({ id: confessionId }, { $set: { reports: [], reportHidden: false } });
+  res.json({ status: 'restored' });
+});

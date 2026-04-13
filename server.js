@@ -95,10 +95,14 @@ async function connectDB() {
   console.log('MongoDB connected');
 
   await analyticsCol.updateOne({ _id: 'main' },
-    { $setOnInsert: { visits: 0, uniqueVisitors: 0, activeVisitors: 0 } }, { upsert: true });
+    { $setOnInsert: { visits: 0, uniqueVisitors: 0 } }, { upsert: true });
   await settingsCol.updateOne({ _id: 'main' },
     { $setOnInsert: { autoApprove: false } }, { upsert: true });
   await pushSubCol.createIndex({ endpoint: 1 }, { unique: true });
+  // TTL index on lastSeen: documents auto-expire after 90s
+  // LEARN: MongoDB TTL index deletes docs automatically — "online now" = docs with recent lastSeen.
+  // Survives Render cold starts (in-memory Map does not).
+  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90, background: true });
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -123,7 +127,7 @@ const ADMIN_PASSWORD   = process.env.ADMIN_PASSWORD || 'gietAdmin123';
 const SESSION_TIMEOUT  = 3600000;
 const LOGIN_RATE_LIMIT = new Map();
 const adminSessions    = new Map();
-const activeVisitors   = new Map();
+// activeVisitors is now DB-backed via uniqueCol.lastSeen (TTL index)
 
 function isValidSession(token) {
   if (!token || !adminSessions.has(token)) return false;
@@ -221,14 +225,19 @@ app.post('/api/push/unsubscribe', async (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Submit confession — Feature 1: branch tag added
+// Submit confession — Feature 1: branch tag, Feature 7: poll support
 app.post('/api/confessions', async (req, res) => {
-  const { message, clientId, category, branch } = req.body;
-  if (!message || !message.trim()) return res.status(400).json({ error: 'Message cannot be empty.' });
-  if (message.trim().split(/\s+/).filter(Boolean).length > 400)
+  const { message, clientId, category, branch, poll } = req.body;
+
+  // For polls, the poll.question IS the message — allow empty message field
+  const isPoll = category === '📊 Poll' && poll && poll.question?.trim();
+  const rawMessage = isPoll ? poll.question.trim() : (message || '').trim();
+
+  if (!rawMessage) return res.status(400).json({ error: 'Message cannot be empty.' });
+  if (rawMessage.split(/\s+/).filter(Boolean).length > 400)
     return res.status(400).json({ error: 'Message exceeds 400 words.' });
 
-  const { cleanText, flags, wasEdited } = filterConfession(message.trim());
+  const { cleanText, flags, wasEdited } = filterConfession(rawMessage);
 
   // Validate branch tag (optional)
   const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
@@ -246,17 +255,22 @@ app.post('/api/confessions', async (req, res) => {
   const confession = {
     id: uuidv4(),
     message: cleanText,
-    originalMessage: wasEdited ? message.trim() : undefined,
+    originalMessage: wasEdited ? rawMessage : undefined,
     category: category || '💭 Random',
-    branchTag,                    // ← Feature 1: null if not provided
+    branchTag,
     createdAt: Date.now(),
     likes: 0, dislikes: 0, votes: {},
-    reactions: { '❤️':0, '😮':0, '😂':0, '🥺':0, '🔥':0 },  // ← Feature 5
-    reactedBy: {},                // clientId → emoji
+    reactions: { '❤️':0, '😮':0, '😂':0, '🥺':0, '🔥':0 },
+    reactedBy: {},
     approved: autoApprove,
     flags: 0, flaggedBy: [],
     filterFlags: flags,
     wasEdited,
+    // ── Poll fields ──
+    isPoll: !!isPoll,
+    pollOptions: isPoll ? { a: (poll.optA||'Yes').slice(0,60), b: (poll.optB||'No').slice(0,60) } : null,
+    pollVotes: isPoll ? { a: 0, b: 0 } : null,
+    pollUserVotes: isPoll ? {} : null,
   };
 
   if (autoApprove) {
@@ -279,7 +293,7 @@ app.post('/api/confessions', async (req, res) => {
       await analyticsCol.updateOne({ _id: 'main' }, { $inc: { uniqueVisitors: 1 } });
     }
   }
-  return res.json({ status: autoApprove ? 'approved' : 'pending', edited: wasEdited, editedFields: flags });
+  return res.json({ status: autoApprove ? 'approved' : 'pending', edited: wasEdited, editedFields: flags, confessionId: confession.id });
 });
 
 // Get approved confessions — Feature 3: last 200, Feature 4: COTD pinned first
@@ -400,26 +414,69 @@ app.get('/api/pending-count', async (req, res) => {
 });
 
 // Visit / Analytics
+// LEARN: DB-backed "online now" count.
+// We upsert a lastSeen timestamp per clientId in unique_visitors.
+// The TTL index (90s) auto-deletes stale docs, so countDocuments = active users.
+// This survives cold starts — in-memory Map resets to 0 every time Render sleeps.
 app.post('/api/visit', async (req, res) => {
   const { clientId } = req.body;
   if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  const now = Date.now();
   const exists = await uniqueCol.findOne({ _id: clientId });
   if (!exists) {
-    await uniqueCol.insertOne({ _id: clientId });
+    await uniqueCol.insertOne({ _id: clientId, firstSeen: now, lastSeen: new Date(now) });
     await analyticsCol.updateOne({ _id: 'main' }, { $inc: { visits: 1, uniqueVisitors: 1 } });
+  } else {
+    // Update lastSeen — TTL index uses this Date field to expire inactive visitors
+    await uniqueCol.updateOne({ _id: clientId }, { $set: { lastSeen: new Date(now) } });
   }
-  activeVisitors.set(clientId, Date.now());
-  await analyticsCol.updateOne({ _id: 'main' }, { $set: { activeVisitors: activeVisitors.size } });
+  // Count active = docs with lastSeen in last 90s (TTL index keeps this clean)
+  const activeCount = await uniqueCol.countDocuments({ lastSeen: { $gte: new Date(now - 90000) } });
   const stats = await analyticsCol.findOne({ _id: 'main' });
-  res.json({ status:'ok', visits: stats.visits, uniqueVisitors: stats.uniqueVisitors, activeVisitors: activeVisitors.size });
+  res.json({ status:'ok', visits: stats.visits, uniqueVisitors: stats.uniqueVisitors, activeVisitors: activeCount });
 });
 app.get('/api/analytics', async (req, res) => {
   const stats = await analyticsCol.findOne({ _id: 'main' });
-  res.json({ visits: stats?.visits||0, uniqueVisitors: stats?.uniqueVisitors||0, activeVisitors: activeVisitors.size });
+  const activeCount = await uniqueCol.countDocuments({ lastSeen: { $gte: new Date(Date.now() - 90000) } });
+  res.json({ visits: stats?.visits||0, uniqueVisitors: stats?.uniqueVisitors||0, activeVisitors: activeCount });
 });
 app.get('/api/settings', async (req, res) => {
   const s = await settingsCol.findOne({ _id: 'main' });
   res.json({ autoApprove: s?.autoApprove||false });
+});
+
+// ── Poll vote ─────────────────────────────────────────
+// LEARN: We store pollUserVotes as { [clientId]: 'a'|'b' } in MongoDB.
+// This lets us check per-user votes without a separate collection.
+app.post('/api/poll/:id/vote', async (req, res) => {
+  const { clientId, option } = req.body;
+  if (!clientId || !['a','b'].includes(option))
+    return res.status(400).json({ error: 'clientId and option (a or b) required' });
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item || !item.isPoll) return res.status(404).json({ error: 'Poll not found' });
+  if (item.pollUserVotes?.[clientId])
+    return res.json({ pollVotes: item.pollVotes, alreadyVoted: true });
+  await confCol.updateOne({ id: req.params.id }, {
+    $inc:  { [`pollVotes.${option}`]: 1 },
+    $set:  { [`pollUserVotes.${clientId}`]: option }
+  });
+  const u = await confCol.findOne({ id: req.params.id });
+  res.json({ pollVotes: u.pollVotes });
+});
+
+// ── "This is me!" ─────────────────────────────────────
+// LEARN: thisIsMe is an array of clientIds stored on the confession document.
+// We use $push to append and check for duplicates before pushing.
+app.post('/api/thisisme/:id', async (req, res) => {
+  const { clientId } = req.body;
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  if ((item.thisIsMe||[]).includes(clientId))
+    return res.json({ count: (item.thisIsMe||[]).length, list: item.thisIsMe||[], alreadyClaimed: true });
+  await confCol.updateOne({ id: req.params.id }, { $push: { thisIsMe: clientId } });
+  const u = await confCol.findOne({ id: req.params.id });
+  res.json({ count: u.thisIsMe.length, list: u.thisIsMe });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

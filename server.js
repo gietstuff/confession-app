@@ -102,7 +102,8 @@ async function connectDB() {
   // TTL index on lastSeen: documents auto-expire after 90s
   // LEARN: MongoDB TTL index deletes docs automatically — "online now" = docs with recent lastSeen.
   // Survives Render cold starts (in-memory Map does not).
-  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90, background: true });
+  try { await uniqueCol.dropIndex('lastSeen_1'); } catch(e) {}  // drop old non-TTL index if exists
+  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90 });
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────

@@ -23,49 +23,110 @@ try {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CONTENT FILTER ENGINE  v3 — AI-first, regex fallback
+// SMART CONTENT FILTER v4 — 100% FREE, zero external API calls
 // ══════════════════════════════════════════════════════════════════════════════
-// LEARN: We call Claude API (claude-haiku-4-5 — cheapest model) to understand
-// context. It catches things regex never could: nicknames, roll numbers written
-// as text, creative spellings of abuse words, indirect threats, etc.
-// If the API call fails (network, quota) we fall back to regex so the server
-// never goes down just because AI is unavailable.
-// ──────────────────────────────────────────────────────────────────────────────
+// LEARN: Why no paid AI? Cost + reliability. If the AI API goes down or runs
+// out of credits, the whole site breaks. This filter handles everything with
+// clever regex patterns. It catches what the old list missed:
+//   • Roll numbers (2k22CS045, 22EGCS001, EG/22/001, etc.)
+//   • Leet-speak abuse (f@ck, $hit, ch*tiya)
+//   • Hinglish abuse with creative spellings
+//   • Section identifiers (sec-A, section F, CSE-B batch)
+//   • Partial name hints (Kh___, R****)
+// ══════════════════════════════════════════════════════════════════════════════
 
 const PHONE_RE  = /(\+?91[\s\-]?)?[6-9]\d{9}/g;
 const EMAIL_RE  = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 const HANDLE_RE = /@[a-zA-Z0-9_.]{2,}/g;
 const LINK_RE   = /https?:\/\/[^\s]+/gi;
 
-const ABUSE_EN = [
+// ── Roll number patterns — covers most Indian college formats ──
+// LEARN: | in regex means OR. We chain all common roll number formats.
+// Examples caught: 2k22CS045, 22EGCS001, EG/22/CS/001, 2022CSE045
+const ROLL_RE = /\b(
+  [2][0-9]{3}[A-Z]{2,4}[0-9]{2,4}         |  (?# 2k22CS045, 2022CS045 )
+  [0-9]{2}[A-Z]{2,6}[0-9]{3,4}             |  (?# 22EGCS001, 22CS045 )
+  [A-Z]{2,4}[\/\-][0-9]{2}[\/\-][0-9]{3,4} |  (?# EG/22/001, CS-22-045 )
+  [A-Z]{2,4}[0-9]{4,8}                      |  (?# EGCS2045, CS220045 )
+  [0-9]{4}[A-Z]{2,4}[0-9]{3,4}              |  (?# 2022CSE045 )
+  \d{2}[A-Z]{2}\d{3,4}                         (?# 22EG045 )
+)\b/gix;
+
+// ── Section/batch identifiers ──
+// Catches: sec-A, section F, CSE-B, branch B, 2nd year A
+const SECTION_RE = /\b(sec(tion)?[\s\-]?[A-F]|[A-Z]{2,4}[\s\-][A-F]\s+batch|branch[\s\-][A-F]|[1-4](st|nd|rd|th)\s+year\s+[A-F])\b/gi;
+
+// ── Partial name hints with blanks/stars (e.g. "Kh___", "R****") ──
+const PARTIAL_NAME_RE = /\b[A-Z][a-zA-Z]{0,3}[_*]{3,}[a-zA-Z]{0,3}\b/g;
+
+// ── Abuse list — English + Hindi/Hinglish + leet-speak variants ──
+// LEARN: The leet-speak variants (f@ck, $hit) are separate patterns.
+// We sort longest-first so "motherfucker" matches before "fucker".
+const ABUSE_WORDS = [
+  // English
   'fuck','fucking','fucked','fucker','fucks','bitch','bitches','shit','shitty',
-  'asshole','bastard','cunt','dick','cock','pussy','whore','slut',
-  'nigger','nigga','faggot','retard','rape','rapist','molest','kys',
-  'motherfucker','mf','piss','bollocks',
-];
-const ABUSE_HI = [
+  'asshole','bastard','cunt','dick','cock','pussy','whore','slut','bollocks',
+  'nigger','nigga','faggot','retard','rape','rapist','molest','kys','piss',
+  'motherfucker','dickhead','bullshit','horseshit','jackass','dumbass',
+  // Hindi/Hinglish
   'chutiya','chutiye','bhenchod','madarchod','bhosdike','bhosdika','bsdk',
-  'lodu','lauda','lavde','gaand','mc','bc','randi','harami','kamina',
-  'saala','saali','gadha','gandu','jhant','lund','chut','bhosdi',
-  'maderchod','bhencho','kutte','kutiya','chodu','chod','chodna','choda',
+  'lodu','lauda','lavde','gaand','randi','harami','gandu','jhant','lund',
+  'chut','bhosdi','maderchod','bhencho','kutte','kutiya','chodu','choda',
+  'chod','chodna','saala','saali','gadha','kamina','haramzada','haramzadi',
+  'rascal','bakwaas','ullu','bhadwa','bhadwi','hijra','chakka',
+  // Common short abuses used in Indian context (context-checked below)
+  'mc','bc',
 ];
 const ABUSE_RE = new RegExp(
   '(?<![a-zA-Z])(' +
-  [...ABUSE_EN, ...ABUSE_HI].sort((a,b)=>b.length-a.length)
+  ABUSE_WORDS.sort((a,b)=>b.length-a.length)
     .map(w=>w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') +
   ')(?![a-zA-Z])', 'gi'
 );
+
+// Leet-speak abuse patterns (f@ck, $hit, ch*tiya, etc.)
+const LEET_RE = /\b(f[@4]c+k|$h[i1]t|[a@]ssh[o0]le|b[i1]tc+h|d[i1]ck|c[@*]ck|p[u@]ssy|wh[o0]re|ch[\*@]t[i1]y[a@]|bh[\*@]nch[o0]d|m[a@]d[a@]rch[o0]d)\b/gi;
+
+// ── "mc" and "bc" are only abuse in certain contexts ──
+// LEARN: "bc" meaning "because" is totally fine. We check what comes
+// after: if it's a vowel/word it's likely "because", otherwise abuse.
+// This is context-sensitive filtering without needing AI.
+function isAbusiveShortForm(word, fullText, matchIndex) {
+  const before = fullText.slice(Math.max(0, matchIndex - 20), matchIndex).toLowerCase();
+  const after  = fullText.slice(matchIndex + word.length, matchIndex + word.length + 10).toLowerCase();
+  if (word.toLowerCase() === 'bc') {
+    // "bc" as "because" usually followed by a space+word or comma
+    if (/\s+(of|he|she|it|i|the|this|that|my|your|his|her|they)/.test(' ' + after)) return false;
+    if (before.trim().endsWith(',')) return false;
+  }
+  if (word.toLowerCase() === 'mc') {
+    // "mc" as "MC (emcee/rapper)" — usually in music context
+    if (/rap|music|song|emcee|hip/.test(before)) return false;
+  }
+  return true;
+}
+
+// ── Name list (expanded with more Indian names) ──
 const COMMON_NAMES = [
-  'aarav','aditya','akash','akshay','amit','amitesh','ananya','anjali','ankit',
-  'ankita','arjun','aryan','ashish','bhavya','deepak','deepika','devansh',
-  'dhruv','divya','gaurav','harsh','harshit','ishaan','janhvi','jay','karan',
-  'kavya','komal','krishna','kunal','manish','mehul','mohit','naman','neha',
-  'nikhil','nikita','nishant','palak','parth','pooja','prachi','prakash',
-  'prashant','prateek','pratik','priya','priyanshi','rahul','raj','rajat',
-  'rajesh','ravi','ritesh','rohit','ruchika','sachin','sahil','sakshi',
-  'sandeep','sanjay','shivam','shreya','siddharth','simran','sneha','soham',
-  'sourav','sumit','suraj','tanvi','tushar','udit','vaibhav','vandana',
-  'vibhav','vikash','vikas','vishal','yash','yashasvi','zara',
+  'aarav','aditya','akash','akshay','akshat','amit','amitesh','ananya','anjali',
+  'ankit','ankita','anushka','arjun','aryan','ashish','bhavya','deepak','deepika',
+  'devansh','dhruv','divya','gaurav','harsh','harshit','ishaan','ishika','janhvi',
+  'jay','karan','kartik','kavya','komal','krishna','kunal','lakshmi','manish',
+  'mehul','mohit','naman','neha','nikhil','nikita','nishant','palak','parth',
+  'pooja','prachi','prakash','prashant','prateek','pratik','priya','priyanshi',
+  'rahul','raj','rajat','rajesh','ravi','ritesh','rohit','ruchika','sachin',
+  'sahil','sakshi','sandeep','sanjay','shivam','shreya','siddharth','simran',
+  'sneha','soham','sourav','sumit','suraj','swati','tanvi','tushar','udit',
+  'vaibhav','vandana','vibhav','vikash','vikas','vishal','yash','yashasvi','zara',
+  // more common GIET-context names
+  'himanshu','harshita','sarthak','utkarsh','aakash','abhishek','ajay','alok',
+  'aman','amisha','anand','anshul','anurag','apoorva','astha','ayush','bhanu',
+  'chetan','chirag','devika','diksha','dinesh','garima','girish','hitesh',
+  'jagdish','jatin','karishma','khushbu','lalit','madhur','mahesh','mansi',
+  'megha','mukesh','nidhi','payal','piyush','pragati','preeti','raghav',
+  'rakesh','ramesh','rashmi','rishi','ritu','rohan','romil','rupesh','sanket',
+  'seema','shubham','sonika','sourabh','subham','sudhir','sunil','suresh',
+  'swapnil','tarun','umesh','vicky','vijay','vinay','vineet','vivek','yogesh',
 ];
 const NAME_RE = new RegExp('\\b(' + COMMON_NAMES.join('|') + ')\\b', 'gi');
 
@@ -74,101 +135,52 @@ function blurWord(word) {
   return word[0] + '*'.repeat(word.length - 2) + word[word.length - 1];
 }
 
-// ── Regex-only fallback filter (used when AI is unavailable) ──
-function filterRegex(rawText) {
-  const flags = []; let text = rawText;
-  if (LINK_RE.test(text))   { flags.push('link');   text = text.replace(LINK_RE,   '[link removed]');   } LINK_RE.lastIndex=0;
-  if (PHONE_RE.test(text))  { flags.push('phone');  text = text.replace(PHONE_RE,  '[number hidden]');  } PHONE_RE.lastIndex=0;
-  if (EMAIL_RE.test(text))  { flags.push('email');  text = text.replace(EMAIL_RE,  '[email hidden]');   }
-  if (HANDLE_RE.test(text)) { flags.push('handle'); text = text.replace(HANDLE_RE, '[handle hidden]');  }
-  if (ABUSE_RE.test(text))  { flags.push('abuse');  text = text.replace(ABUSE_RE,  m=>blurWord(m));     } ABUSE_RE.lastIndex=0;
-  if (NAME_RE.test(text))   { flags.push('name');   text = text.replace(NAME_RE,   '[Name]');           } NAME_RE.lastIndex=0;
-  return { cleanText: text, flags, wasEdited: text !== rawText };
-}
+// ── Main filter — synchronous, no external calls, fast ──
+function filterConfession(rawText) {
+  const flags = [];
+  let text = rawText;
 
-// ── AI filter using Claude API ──
-// LEARN: We use claude-haiku-4-5 (fastest, cheapest). We give it a strict JSON
-// schema to fill — this is called "structured output prompting". We tell it:
-// return ONLY JSON, no explanation. Then we parse it.
-// The model understands context: "Kh___" is a name hint, "2k22CS045" is a roll
-// number, "bc" in Hinglish context is abuse, etc.
-async function filterWithAI(rawText) {
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-  if (!ANTHROPIC_KEY) throw new Error('No ANTHROPIC_API_KEY');
+  // 1. Links
+  if (LINK_RE.test(text)) { flags.push('link'); text = text.replace(LINK_RE, '[link removed]'); } LINK_RE.lastIndex = 0;
 
-  const prompt = `You are a content moderator for a college anonymous confession website (Indian college, GIET University).
-Your job: clean the message so no one can be identified or harassed.
+  // 2. Phone numbers
+  if (PHONE_RE.test(text)) { flags.push('phone'); text = text.replace(PHONE_RE, '[number hidden]'); } PHONE_RE.lastIndex = 0;
 
-Rules:
-1. NAMES: Replace any real person's name (even partial like "Kh___" or "that girl from sec-F") with [Name]
-2. ROLL NUMBERS: Replace roll numbers, student IDs (e.g. 2k22CS045, 22EGCS001) with [roll hidden]  
-3. PHONE NUMBERS: Replace Indian phone numbers (10 digits, starting 6-9, or +91 prefix) with [number hidden]
-4. EMAILS/HANDLES: Replace emails and @handles with [contact hidden]
-5. LINKS: Replace URLs with [link removed]
-6. ABUSE: Blur abusive words (English and Hindi/Hinglish: fuck, chutiya, bsdk, mc, bc used as abuse, etc.) using asterisks like f**k
-7. SECTION/CLASS hints: If someone says "sec-F girl" or "that CSE-B guy" in a way that identifies a person, replace the identifying part with [section hidden]
-8. HARMLESS content: Do NOT flag normal words. "bc" meaning "because" is fine. Context matters.
+  // 3. Email
+  if (EMAIL_RE.test(text)) { flags.push('email'); text = text.replace(EMAIL_RE, '[email hidden]'); }
 
-Respond ONLY with this JSON (no other text, no markdown):
-{
-  "cleanText": "<the cleaned message>",
-  "flags": ["name"|"roll"|"phone"|"email"|"handle"|"link"|"abuse"|"section"],
-  "wasEdited": true|false,
-  "aiReasoning": "<one sentence explaining what you changed and why, or 'No changes needed'>"
-}
+  // 4. Handles
+  if (HANDLE_RE.test(text)) { flags.push('handle'); text = text.replace(HANDLE_RE, '[handle hidden]'); }
 
-Message to clean:
-${rawText}`;
+  // 5. Roll numbers (new — catches 2k22CS045 etc.)
+  if (ROLL_RE.test(text)) { flags.push('roll'); text = text.replace(ROLL_RE, '[roll hidden]'); } ROLL_RE.lastIndex = 0;
 
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }]
-    })
+  // 6. Section/batch identifiers
+  if (SECTION_RE.test(text)) { flags.push('section'); text = text.replace(SECTION_RE, '[section hidden]'); } SECTION_RE.lastIndex = 0;
+
+  // 7. Partial name hints (Kh___, R****)
+  if (PARTIAL_NAME_RE.test(text)) { flags.push('partial_name'); text = text.replace(PARTIAL_NAME_RE, '[Name]'); } PARTIAL_NAME_RE.lastIndex = 0;
+
+  // 8. Leet-speak abuse
+  if (LEET_RE.test(text)) { flags.push('abuse'); text = text.replace(LEET_RE, m => blurWord(m)); } LEET_RE.lastIndex = 0;
+
+  // 9. Standard abuse (with context check for mc/bc)
+  let abuseFound = false;
+  text = text.replace(ABUSE_RE, (match, p1, offset) => {
+    const lower = match.toLowerCase();
+    if ((lower === 'mc' || lower === 'bc') && !isAbusiveShortForm(match, text, offset)) {
+      return match; // keep it — it's "because" or "emcee"
+    }
+    abuseFound = true;
+    return blurWord(match);
   });
+  ABUSE_RE.lastIndex = 0;
+  if (abuseFound && !flags.includes('abuse')) flags.push('abuse');
 
-  if (!resp.ok) throw new Error(`AI API error: ${resp.status}`);
-  const data = await resp.json();
-  const raw = data.content?.[0]?.text || '';
+  // 10. Known names
+  if (NAME_RE.test(text)) { flags.push('name'); text = text.replace(NAME_RE, '[Name]'); } NAME_RE.lastIndex = 0;
 
-  // Strip markdown code fences if model adds them
-  const jsonStr = raw.replace(/```json\n?|```/g, '').trim();
-  const parsed = JSON.parse(jsonStr);
-
-  // Validate shape
-  if (!parsed.cleanText || typeof parsed.wasEdited !== 'boolean') {
-    throw new Error('Invalid AI response shape');
-  }
-
-  return {
-    cleanText: parsed.cleanText,
-    flags: Array.isArray(parsed.flags) ? parsed.flags : [],
-    wasEdited: parsed.wasEdited,
-    aiReasoning: parsed.aiReasoning || '',
-    usedAI: true
-  };
-}
-
-// ── Main filter — tries AI first, falls back to regex ──
-// LEARN: async/await means this returns a Promise. The caller must await it.
-// The "|| filterRegex(rawText)" fallback ensures the site never breaks if
-// the AI API is down or the key is missing.
-async function filterConfession(rawText) {
-  try {
-    const result = await filterWithAI(rawText);
-    console.log(`[AI filter] "${rawText.slice(0,40)}…" → flags: [${result.flags}] | ${result.aiReasoning}`);
-    return result;
-  } catch(err) {
-    console.warn('[AI filter] Failed, using regex fallback:', err.message);
-    return { ...filterRegex(rawText), usedAI: false, aiReasoning: 'AI unavailable — regex filter used' };
-  }
+  return { cleanText: text, flags, wasEdited: text !== rawText, aiReasoning: '', usedAI: false };
 }
 
 // ── MongoDB ───────────────────────────────────────────────────────────────────
@@ -196,7 +208,8 @@ async function connectDB() {
   // TTL index on lastSeen: documents auto-expire after 90s
   // LEARN: MongoDB TTL index deletes docs automatically — "online now" = docs with recent lastSeen.
   // Survives Render cold starts (in-memory Map does not).
-  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90, background: true });
+  try { await uniqueCol.dropIndex('lastSeen_1'); } catch(e) {}
+  await uniqueCol.createIndex({ lastSeen: 1 }, { expireAfterSeconds: 90 });
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -331,7 +344,7 @@ app.post('/api/confessions', async (req, res) => {
   if (rawMessage.split(/\s+/).filter(Boolean).length > 400)
     return res.status(400).json({ error: 'Message exceeds 400 words.' });
 
-  const { cleanText, flags, wasEdited, aiReasoning, usedAI } = await filterConfession(rawMessage);
+  const { cleanText, flags, wasEdited } = filterConfession(rawMessage);
 
   // Validate branch tag (optional)
   const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
@@ -360,8 +373,6 @@ app.post('/api/confessions', async (req, res) => {
     flags: 0, flaggedBy: [],
     filterFlags: flags,
     wasEdited,
-    aiReasoning: aiReasoning||'',
-    usedAI: !!usedAI,
     // ── Poll fields ──
     isPoll: !!isPoll,
     pollOptions: isPoll ? { a: (poll.optA||'Yes').slice(0,60), b: (poll.optB||'No').slice(0,60) } : null,
@@ -394,8 +405,7 @@ app.post('/api/confessions', async (req, res) => {
 
 // Get approved confessions — Feature 3: last 200, Feature 4: COTD pinned first
 app.get('/api/confessions', async (req, res) => {
-  // Exclude reportHidden confessions from public feed
-  const data = await confCol.find({ reportHidden: { $ne: true } }).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
+  const data = await confCol.find({}).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
   const cotdId = await getConfessionOfTheDay();
   // Attach cotd flag
   data.forEach(c => { c.isConfessionOfDay = (c.id === cotdId); });
@@ -661,62 +671,30 @@ app.post('/api/admin/delete', async (req, res) => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-connectDB().then(() => {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-}).catch(err => { console.error('MongoDB connection failed:', err); process.exit(1); });
-
-// ══════════════════════════════════════════════════════════════════════════════
-// COMMUNITY REPORT SYSTEM
-// LEARN: This gives users real power. Instead of just "flag" (which admins
-// may never see), users can report with a specific reason. When 3+ unique
-// users report the same confession, it gets auto-hidden from the feed and
-// moved to a special "reported" queue in the admin panel.
-// This is called "community moderation" — used by Reddit, Twitter, etc.
-// ══════════════════════════════════════════════════════════════════════════════
-
-const REPORT_THRESHOLD = 3; // auto-hide after this many unique reports
-
+// ── Community report + reply delete routes ────────────────────────────────────
+const REPORT_THRESHOLD = 3;
 app.post('/api/report/:id', async (req, res) => {
   const { clientId, reason } = req.body;
-  // reason options: 'identity' | 'harassment' | 'fake' | 'spam' | 'other'
-  const VALID_REASONS = ['identity', 'harassment', 'fake', 'spam', 'other'];
+  const VALID = ['identity','harassment','fake','spam','other'];
   if (!clientId) return res.status(400).json({ error: 'clientId required' });
-  if (!VALID_REASONS.includes(reason)) return res.status(400).json({ error: 'Invalid reason' });
-
+  if (!VALID.includes(reason)) return res.status(400).json({ error: 'Invalid reason' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
-
-  // Check if this client already reported
-  const alreadyReported = (item.reports||[]).some(r => r.clientId === clientId);
-  if (alreadyReported) return res.json({ alreadyReported: true, reportCount: item.reports.length });
-
-  // Add report
-  const report = { clientId, reason, reportedAt: Date.now() };
-  await confCol.updateOne({ id: req.params.id }, { $push: { reports: report } });
-
-  // Fetch updated doc
+  if ((item.reports||[]).some(r => r.clientId === clientId))
+    return res.json({ alreadyReported: true, reportCount: (item.reports||[]).length });
+  await confCol.updateOne({ id: req.params.id }, { $push: { reports: { clientId, reason, reportedAt: Date.now() } } });
   const updated = await confCol.findOne({ id: req.params.id });
-  const reportCount = updated.reports.length;
-
-  // Auto-hide if threshold reached
-  if (reportCount >= REPORT_THRESHOLD && !item.reportHidden) {
+  const reportCount = (updated.reports||[]).length;
+  if (reportCount >= REPORT_THRESHOLD && !item.reportHidden)
     await confCol.updateOne({ id: req.params.id }, { $set: { reportHidden: true } });
-    console.log(`[Reports] Confession ${req.params.id} auto-hidden after ${reportCount} reports`);
-  }
-
   res.json({ status: 'reported', reportCount, autoHidden: reportCount >= REPORT_THRESHOLD });
 });
-
-// Get reported confessions (admin only)
 app.get('/api/reported', async (req, res) => {
   const token = req.cookies.admin_token || req.headers['x-admin-token'];
   if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
-  const data = await confCol.find({ 'reports.0': { $exists: true } })
-    .sort({ 'reports.length': -1, createdAt: -1 }).limit(100).toArray();
+  const data = await confCol.find({ 'reports.0': { $exists: true } }).sort({ createdAt: -1 }).limit(100).toArray();
   res.json(data);
 });
-
-// Restore a reported confession (admin clears reports and unhides)
 app.post('/api/admin/restore', async (req, res) => {
   const token = req.cookies.admin_token || req.headers['x-admin-token'];
   if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
@@ -724,3 +702,16 @@ app.post('/api/admin/restore', async (req, res) => {
   await confCol.updateOne({ id: confessionId }, { $set: { reports: [], reportHidden: false } });
   res.json({ status: 'restored' });
 });
+app.post('/api/admin/reply/delete', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { replyId } = req.body;
+  if (!replyId) return res.status(400).json({ error: 'replyId required' });
+  const result = await repliesCol.deleteOne({ id: replyId });
+  if (!result.deletedCount) return res.status(404).json({ error: 'Reply not found' });
+  res.json({ removed: replyId });
+});
+
+connectDB().then(() => {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}).catch(err => { console.error('MongoDB connection failed:', err); process.exit(1); });

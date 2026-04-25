@@ -43,14 +43,7 @@ const LINK_RE   = /https?:\/\/[^\s]+/gi;
 // ── Roll number patterns — covers most Indian college formats ──
 // LEARN: | in regex means OR. We chain all common roll number formats.
 // Examples caught: 2k22CS045, 22EGCS001, EG/22/CS/001, 2022CSE045
-const ROLL_RE = /\b(
-  [2][0-9]{3}[A-Z]{2,4}[0-9]{2,4}         |  (?# 2k22CS045, 2022CS045 )
-  [0-9]{2}[A-Z]{2,6}[0-9]{3,4}             |  (?# 22EGCS001, 22CS045 )
-  [A-Z]{2,4}[\/\-][0-9]{2}[\/\-][0-9]{3,4} |  (?# EG/22/001, CS-22-045 )
-  [A-Z]{2,4}[0-9]{4,8}                      |  (?# EGCS2045, CS220045 )
-  [0-9]{4}[A-Z]{2,4}[0-9]{3,4}              |  (?# 2022CSE045 )
-  \d{2}[A-Z]{2}\d{3,4}                         (?# 22EG045 )
-)\b/gix;
+const ROLL_RE = /\b([2][0-9]{3}[A-Z]{2,4}[0-9]{2,4}|[0-9]{2}[A-Z]{2,6}[0-9]{3,4}|[A-Z]{2,4}[\/\-][0-9]{2}[\/\-][0-9]{3,4}|[A-Z]{2,4}[0-9]{4,8}|[0-9]{4}[A-Z]{2,4}[0-9]{3,4}|\d{2}[A-Z]{2}\d{3,4})\b/gi;
 
 // ── Section/batch identifiers ──
 // Catches: sec-A, section F, CSE-B, branch B, 2nd year A
@@ -710,6 +703,96 @@ app.post('/api/admin/reply/delete', async (req, res) => {
   const result = await repliesCol.deleteOne({ id: replyId });
   if (!result.deletedCount) return res.status(404).json({ error: 'Reply not found' });
   res.json({ removed: replyId });
+});
+
+// ════════════════════════════════════════════════════════
+// NEW FEATURES
+// ════════════════════════════════════════════════════════
+
+// REMOVE button — 4 removes → flag for re-review
+const REMOVE_THRESHOLD = 4;
+app.post('/api/remove/:id', async (req, res) => {
+  const { clientId } = req.body;
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  const item = await confCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  if ((item.removedBy||[]).includes(clientId))
+    return res.json({ alreadyRemoved: true, removeCount: (item.removedBy||[]).length });
+  await confCol.updateOne({ id: req.params.id }, { $push: { removedBy: clientId } });
+  const updated = await confCol.findOne({ id: req.params.id });
+  const removeCount = (updated.removedBy||[]).length;
+  if (removeCount >= REMOVE_THRESHOLD && !item.flaggedForReview)
+    await confCol.updateOne({ id: req.params.id }, { $set: { flaggedForReview: true } });
+  res.json({ status: 'removed', removeCount, flagged: removeCount >= REMOVE_THRESHOLD });
+});
+
+// Admin reply delete
+app.post('/api/admin/reply/delete', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { replyId } = req.body;
+  if (!replyId) return res.status(400).json({ error: 'replyId required' });
+  const result = await repliesCol.deleteOne({ id: replyId });
+  if (!result.deletedCount) return res.status(404).json({ error: 'Reply not found' });
+  res.json({ removed: replyId });
+});
+
+// Flagged-for-review list (admin)
+app.get('/api/flagged-review', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const data = await confCol.find({ flaggedForReview: true }).sort({ createdAt: -1 }).toArray();
+  res.json(data);
+});
+app.post('/api/admin/clear-review', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { confessionId } = req.body;
+  await confCol.updateOne({ id: confessionId }, { $set: { flaggedForReview: false, removedBy: [] } });
+  res.json({ status: 'cleared' });
+});
+
+// Read view counter — increment when confession scrolls into view
+app.post('/api/view/:id', async (req, res) => {
+  await confCol.updateOne({ id: req.params.id }, { $inc: { views: 1 } });
+  res.json({ ok: true });
+});
+
+// Scheduled approve — admin approves with a future timestamp
+app.post('/api/admin/schedule', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { confessionId, scheduledAt } = req.body; // scheduledAt = ISO timestamp
+  if (!confessionId || !scheduledAt) return res.status(400).json({ error: 'confessionId and scheduledAt required' });
+  await pendingCol.updateOne({ id: confessionId }, { $set: { scheduledAt: new Date(scheduledAt) } });
+  res.json({ status: 'scheduled', scheduledAt });
+});
+
+// Background job: publish scheduled confessions
+async function publishScheduled() {
+  const now = new Date();
+  const due = await pendingCol.find({ scheduledAt: { $lte: now }, approved: { $ne: true } }).toArray();
+  for (const item of due) {
+    const { _id, ...conf } = item;
+    conf.approved = true; conf.scheduledAt = undefined;
+    await confCol.insertOne(conf);
+    await pendingCol.deleteOne({ id: conf.id });
+  }
+  if (due.length) await pruneConfessions();
+}
+setInterval(publishScheduled, 60 * 1000); // check every minute
+
+// Weekly prompt / themed confession day
+app.get('/api/prompt', async (req, res) => {
+  const s = await settingsCol.findOne({ _id: 'main' });
+  res.json({ prompt: s?.weeklyPrompt || null, promptTheme: s?.promptTheme || null });
+});
+app.post('/api/admin/prompt', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { prompt, promptTheme } = req.body; // promptTheme: 'crush'|'hostel'|'exam'|'random'|''
+  await settingsCol.updateOne({ _id: 'main' }, { $set: { weeklyPrompt: prompt||'', promptTheme: promptTheme||'' } });
+  res.json({ status: 'saved' });
 });
 
 connectDB().then(() => {

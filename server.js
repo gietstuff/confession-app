@@ -7,6 +7,7 @@ const { MongoClient } = require('mongodb');
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
+const EMOJI_REACTIONS = ['❤️','😮','😂','🥺','🔥'];
 
 // ── Web Push (VAPID) ──────────────────────────────────────────────────────────
 let webpush = null;
@@ -352,6 +353,24 @@ app.post('/api/confessions', async (req, res) => {
   const settings = await settingsCol.findOne({ _id: 'main' });
   const autoApprove = settings?.autoApprove || false;
 
+  const rawPollOptions = isPoll
+    ? (Array.isArray(poll.options) ? poll.options : [poll.optA || 'Yes', poll.optB || 'No'])
+    : [];
+  const cleanPollOptions = rawPollOptions
+    .map(o => String(o || '').trim().slice(0, 60))
+    .filter(Boolean)
+    .slice(0, 8);
+  if (isPoll && cleanPollOptions.length < 2) {
+    return res.status(400).json({ error: 'Poll must have at least 2 options.' });
+  }
+  const pollOptionMap = {};
+  const pollVoteMap = {};
+  cleanPollOptions.forEach((opt, idx) => {
+    const key = `o${idx + 1}`;
+    pollOptionMap[key] = opt;
+    pollVoteMap[key] = 0;
+  });
+
   const confession = {
     id: uuidv4(),
     message: cleanText,
@@ -368,8 +387,8 @@ app.post('/api/confessions', async (req, res) => {
     wasEdited,
     // ── Poll fields ──
     isPoll: !!isPoll,
-    pollOptions: isPoll ? { a: (poll.optA||'Yes').slice(0,60), b: (poll.optB||'No').slice(0,60) } : null,
-    pollVotes: isPoll ? { a: 0, b: 0 } : null,
+    pollOptions: isPoll ? pollOptionMap : null,
+    pollVotes: isPoll ? pollVoteMap : null,
     pollUserVotes: isPoll ? {} : null,
   };
 
@@ -487,7 +506,14 @@ app.post('/api/replies/:confessionId', async (req, res) => {
   if (message.trim().length > 500) return res.status(400).json({ error: 'Reply too long.' });
   const conf = await confCol.findOne({ id: req.params.confessionId });
   if (!conf) return res.status(404).json({ error: 'Confession not found' });
-  const reply = { id: uuidv4(), confessionId: req.params.confessionId, message: message.trim(), createdAt: Date.now() };
+  const reply = {
+    id: uuidv4(),
+    confessionId: req.params.confessionId,
+    message: message.trim(),
+    createdAt: Date.now(),
+    reactions: { '❤️':0, '😮':0, '😂':0, '🥺':0, '🔥':0 },
+    reactedBy: {}
+  };
   await repliesCol.insertOne(reply);
   res.json({ status: 'ok', reply });
 });
@@ -550,18 +576,21 @@ app.get('/api/settings', async (req, res) => {
 // This lets us check per-user votes without a separate collection.
 app.post('/api/poll/:id/vote', async (req, res) => {
   const { clientId, option } = req.body;
-  if (!clientId || !['a','b'].includes(option))
-    return res.status(400).json({ error: 'clientId and option (a or b) required' });
+  if (!clientId || !option)
+    return res.status(400).json({ error: 'clientId and option required' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item || !item.isPoll) return res.status(404).json({ error: 'Poll not found' });
-  if (item.pollUserVotes?.[clientId])
-    return res.json({ pollVotes: item.pollVotes, alreadyVoted: true });
+  const validOptions = Object.keys(item.pollOptions || {});
+  if (!validOptions.includes(option)) return res.status(400).json({ error: 'Invalid poll option' });
+  const prev = item.pollUserVotes?.[clientId];
+  const inc = { [`pollVotes.${option}`]: 1 };
+  if (prev && validOptions.includes(prev)) inc[`pollVotes.${prev}`] = -1;
   await confCol.updateOne({ id: req.params.id }, {
-    $inc:  { [`pollVotes.${option}`]: 1 },
-    $set:  { [`pollUserVotes.${clientId}`]: option }
+    $inc: inc,
+    $set: { [`pollUserVotes.${clientId}`]: option }
   });
   const u = await confCol.findOne({ id: req.params.id });
-  res.json({ pollVotes: u.pollVotes });
+  res.json({ pollVotes: u.pollVotes, myVote: u.pollUserVotes?.[clientId] || option, changed: !!prev });
 });
 
 // ── "This is me!" ─────────────────────────────────────
@@ -667,7 +696,7 @@ app.post('/api/admin/delete', async (req, res) => {
 // ── Community report + reply delete routes ────────────────────────────────────
 const REPORT_THRESHOLD = 3;
 app.post('/api/report/:id', async (req, res) => {
-  const { clientId, reason } = req.body;
+  const { clientId, reason, otherMessage } = req.body;
   const VALID = ['identity','harassment','fake','spam','other'];
   if (!clientId) return res.status(400).json({ error: 'clientId required' });
   if (!VALID.includes(reason)) return res.status(400).json({ error: 'Invalid reason' });
@@ -675,7 +704,17 @@ app.post('/api/report/:id', async (req, res) => {
   if (!item) return res.status(404).json({ error: 'Not found' });
   if ((item.reports||[]).some(r => r.clientId === clientId))
     return res.json({ alreadyReported: true, reportCount: (item.reports||[]).length });
-  await confCol.updateOne({ id: req.params.id }, { $push: { reports: { clientId, reason, reportedAt: Date.now() } } });
+  const safeOther = reason === 'other' ? String(otherMessage || '').trim().slice(0, 500) : '';
+  await confCol.updateOne({ id: req.params.id }, {
+    $push: {
+      reports: {
+        clientId,
+        reason,
+        otherMessage: safeOther || undefined,
+        reportedAt: Date.now()
+      }
+    }
+  });
   const updated = await confCol.findOne({ id: req.params.id });
   const reportCount = (updated.reports||[]).length;
   if (reportCount >= REPORT_THRESHOLD && !item.reportHidden)
@@ -756,6 +795,29 @@ app.post('/api/admin/clear-review', async (req, res) => {
 app.post('/api/view/:id', async (req, res) => {
   await confCol.updateOne({ id: req.params.id }, { $inc: { views: 1 } });
   res.json({ ok: true });
+});
+
+// Reply reactions
+app.post('/api/reply/react/:replyId', async (req, res) => {
+  const { clientId, emoji } = req.body;
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!EMOJI_REACTIONS.includes(emoji)) return res.status(400).json({ error: 'Invalid emoji' });
+  const reply = await repliesCol.findOne({ id: req.params.replyId });
+  if (!reply) return res.status(404).json({ error: 'Reply not found' });
+
+  const prev = reply.reactedBy?.[clientId];
+  const upd = {};
+  if (prev === emoji) {
+    upd.$inc = { [`reactions.${emoji}`]: -1 };
+    upd.$unset = { [`reactedBy.${clientId}`]: '' };
+  } else {
+    upd.$inc = { [`reactions.${emoji}`]: 1 };
+    upd.$set = { [`reactedBy.${clientId}`]: emoji };
+    if (prev) upd.$inc[`reactions.${prev}`] = -1;
+  }
+  await repliesCol.updateOne({ id: req.params.replyId }, upd);
+  const fresh = await repliesCol.findOne({ id: req.params.replyId });
+  res.json({ reactions: fresh.reactions || {}, myReaction: fresh.reactedBy?.[clientId] || null });
 });
 
 // Scheduled approve — admin approves with a future timestamp

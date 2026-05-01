@@ -343,7 +343,7 @@ app.post('/api/confessions', async (req, res) => {
 
   // Validate branch tag (optional)
   const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
-  const VALID_BRANCHES = ['CSE','AIML','ECE','AGRI','Others'];
+  const VALID_BRANCHES = ['CSE','AIML','ECE','AGRI','BBA','MBA','BCA','MCA','Others'];
   let branchTag = null;
   if (branch && branch.year && branch.branch) {
     if (VALID_YEARS.includes(branch.year) && VALID_BRANCHES.includes(branch.branch)) {

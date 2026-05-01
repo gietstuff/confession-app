@@ -1,0 +1,76 @@
+GIET CONFESSIONS - UPDATE NOTES (May 2026)
+==========================================
+
+Purpose
+-------
+This file documents the effective fixes applied after the v2.5/v3.0 rollout so another AI can quickly understand what was changed and why.
+
+Files updated in this pass
+--------------------------
+1) server.js
+2) giet-confession-frontend/public/index.html
+3) giet-confession-frontend/public/admin.html
+4) giet-confession-frontend/public/confessions-v3.html
+
+Key fixes completed
+-------------------
+
+1. Index page JS crash fix
+   - Fixed duplicated declaration of `shareText`.
+   - Fixed malformed function declaration (`async async function ...`).
+   - Removed stray dead code block left in share section.
+   - Why: this syntax crash was stopping all later JS execution, causing broken UI (report, loading, etc.).
+
+2. Sort default alignment
+   - Set index sort default to New in both state and menu UI.
+   - Why: user requirement is New default, not Top.
+
+3. Report submit button usability (mobile)
+   - Removed reliance on native `disabled` toggling in report flow.
+   - Uses visual + data-state gating (opacity/cursor/data-enabled) and runtime validation in `submitReport()`.
+   - Why: disabled buttons are non-interactive on some mobile paths and were causing "can't click report".
+
+4. Share flow stabilization
+   - Kept screenshot-based purple-red story workflow.
+   - Preserved WhatsApp sharing route.
+   - Fixed broken share function chain so no parser/runtime interruptions occur.
+
+5. Admin poll count rendering
+   - Pending and Approved sections now render poll results via dynamic option iteration:
+     `Object.entries(item.pollOptions || {})`.
+   - No more hardcoded A/B-only rendering in admin.
+   - Why: backend now supports multi-option polls (o1..o8).
+
+6. v3 poll compatibility updates
+   - v3 submit now sends `poll.options` array (instead of only optA/optB fields).
+   - v3 poll vote in-place update now uses `data-opt` mapping, not index-order guessing.
+   - Why: ensures poll bars update correctly for multi-option poll payloads.
+
+7. Backend reliability / Render health
+   - Added `/health` endpoint returning 200 JSON.
+   - Added `const pruneConfessions = enforceConfessionLimit;` alias.
+   - Why: `publishScheduled()` called `pruneConfessions()` and could crash if undefined.
+     This could explain intermittent Render "instance failed" events.
+
+8. Admin prompt theme key consistency
+   - Admin dropdown value changed from `random` to `general`.
+   - Why: frontend theme system expects `general`; mismatch prevented expected theme behavior.
+
+Notes
+-----
+- Funny category is client-driven and accepted server-side (no strict category whitelist).
+- Multi-option poll backend remains in `server.js` with changeable voting already active.
+- Reply reactions endpoint remains: `POST /api/reply/react/:replyId`.
+
+Suggested post-deploy checks
+----------------------------
+1) Open index page and confirm no console syntax errors.
+2) Submit a multi-option poll and verify:
+   - visible in feed,
+   - vote can be changed,
+   - admin shows dynamic counts.
+3) Open report modal on mobile, select reason, submit successfully.
+4) Check Render health endpoint:
+   GET https://confession-app-1w0s.onrender.com/health
+5) Open confessions-v3 and verify poll voting updates bars correctly.
+

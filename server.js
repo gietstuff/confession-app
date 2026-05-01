@@ -262,6 +262,7 @@ async function enforceConfessionLimit() {
     console.log(`Pruned ${ids.length} old confession(s) to stay under ${MAX_CONFESSIONS}`);
   }
 }
+const pruneConfessions = enforceConfessionLimit;
 // Also remove the old 24h pending cleanup — keep pending indefinitely until moderated
 async function cleanupOldPending() {
   const cutoff = Date.now() - 7 * 24 * 3600 * 1000; // 7 days for pending
@@ -795,6 +796,10 @@ app.post('/api/admin/clear-review', async (req, res) => {
 app.post('/api/view/:id', async (req, res) => {
   await confCol.updateOne({ id: req.params.id }, { $inc: { views: 1 } });
   res.json({ ok: true });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', service: 'giet-confessions', time: Date.now() });
 });
 
 // Reply reactions

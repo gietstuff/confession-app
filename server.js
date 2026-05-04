@@ -220,8 +220,60 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '10kb' })); // body size cap — prevents DoS via huge payloads
 app.use(cookieParser());
+
+// ── Security headers (no helmet needed — plain Express) ──────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+// ── In-memory rate limiter (no npm package — pure JS Map) ────────────────────
+// Survives the session but resets on cold start (acceptable for free tier).
+// Structure: Map<ip, Map<endpoint, { count, resetAt }>>
+const _rl = new Map();
+function rateLimit(endpoint, ip, max, windowMs) {
+  const now = Date.now();
+  if (!_rl.has(ip)) _rl.set(ip, new Map());
+  const ipMap = _rl.get(ip);
+  if (!ipMap.has(endpoint) || now > ipMap.get(endpoint).resetAt) {
+    ipMap.set(endpoint, { count: 1, resetAt: now + windowMs });
+    return true; // allowed
+  }
+  const slot = ipMap.get(endpoint);
+  slot.count++;
+  return slot.count <= max; // false = rate limited
+}
+// Clean up old entries every 10 minutes to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, epMap] of _rl.entries()) {
+    for (const [ep, slot] of epMap.entries()) if (now > slot.resetAt) epMap.delete(ep);
+    if (!epMap.size) _rl.delete(ip);
+  }
+}, 10 * 60 * 1000);
+
+function rlMiddleware(endpoint, max, windowMs, message) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    if (!rateLimit(endpoint, ip, max, windowMs)) {
+      return res.status(429).json({ error: message || 'Too many requests. Please slow down.' });
+    }
+    next();
+  };
+}
+
+// ── clientId validation helper ────────────────────────────────────────────────
+// clientId must be a UUID v4 string. Anything else is rejected.
+// This closes the console exploit: someone sending clientId:"hacker1","hacker2"...
+// to bypass per-user limits.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function validateClientId(clientId) {
+  return typeof clientId === 'string' && UUID_RE.test(clientId);
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 const ADMIN_PASSWORD   = process.env.ADMIN_PASSWORD || 'gietAdmin123';
@@ -328,8 +380,10 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 });
 
 // Submit confession — Feature 1: branch tag, Feature 7: poll support
-app.post('/api/confessions', async (req, res) => {
+app.post('/api/confessions', rlMiddleware('submit', 5, 3600000, 'Too many submissions. Try again in an hour.'), async (req, res) => {
   const { message, clientId, category, branch, poll } = req.body;
+  // clientId is optional on submit but if provided must be valid UUID
+  if (clientId && !validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
 
   // For polls, the poll.question IS the message — allow empty message field
   const isPoll = category === '📊 Poll' && poll && poll.question?.trim();
@@ -432,9 +486,9 @@ app.get('/api/confessions', async (req, res) => {
 });
 
 // Like / Dislike (kept for compatibility)
-app.post('/api/like/:id', async (req, res) => {
+app.post('/api/like/:id', rlMiddleware('like', 15, 60000, 'Too many likes. Slow down.'), async (req, res) => {
   const { clientId } = req.body;
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
   if (item.votes?.[clientId] === 'like') return res.json({ likes: item.likes, dislikes: item.dislikes });
@@ -444,9 +498,9 @@ app.post('/api/like/:id', async (req, res) => {
   const u = await confCol.findOne({ id: req.params.id });
   res.json({ likes: u.likes, dislikes: u.dislikes });
 });
-app.post('/api/dislike/:id', async (req, res) => {
+app.post('/api/dislike/:id', rlMiddleware('dislike', 15, 60000, 'Too many dislikes. Slow down.'), async (req, res) => {
   const { clientId } = req.body;
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
   if (item.votes?.[clientId] === 'dislike') return res.json({ likes: item.likes, dislikes: item.dislikes });
@@ -458,10 +512,10 @@ app.post('/api/dislike/:id', async (req, res) => {
 });
 
 // Feature 5: Emoji reactions endpoint
-app.post('/api/react/:id', async (req, res) => {
+app.post('/api/react/:id', rlMiddleware('react', 20, 60000, 'Too many reactions.'), async (req, res) => {
   const { clientId, emoji } = req.body;
   const VALID_EMOJIS = ['❤️','😮','😂','🥺','🔥'];
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   if (!VALID_EMOJIS.includes(emoji)) return res.status(400).json({ error: 'Invalid emoji' });
 
   const item = await confCol.findOne({ id: req.params.id });
@@ -486,9 +540,9 @@ app.post('/api/react/:id', async (req, res) => {
 });
 
 // Flag
-app.post('/api/flag/:id', async (req, res) => {
+app.post('/api/flag/:id', rlMiddleware('flag', 10, 60000, 'Too many flags.'), async (req, res) => {
   const { clientId } = req.body;
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
   if ((item.flaggedBy||[]).includes(clientId)) return res.json({ flags: item.flags, alreadyFlagged: true });
@@ -501,10 +555,11 @@ app.get('/api/replies/:confessionId', async (req, res) => {
   const replies = await repliesCol.find({ confessionId: req.params.confessionId }).sort({ createdAt: 1 }).toArray();
   res.json(replies);
 });
-app.post('/api/replies/:confessionId', async (req, res) => {
+app.post('/api/replies/:confessionId', rlMiddleware('reply', 5, 300000, 'Too many replies. Wait 5 minutes.'), async (req, res) => {
   const { message, clientId } = req.body;
   if (!message || !message.trim()) return res.status(400).json({ error: 'Reply cannot be empty.' });
   if (message.trim().length > 500) return res.status(400).json({ error: 'Reply too long.' });
+  if (clientId && !validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   const conf = await confCol.findOne({ id: req.params.confessionId });
   if (!conf) return res.status(404).json({ error: 'Confession not found' });
   const reply = {
@@ -545,9 +600,9 @@ app.get('/api/pending-count', async (req, res) => {
 // We upsert a lastSeen timestamp per clientId in unique_visitors.
 // The TTL index (90s) auto-deletes stale docs, so countDocuments = active users.
 // This survives cold starts — in-memory Map resets to 0 every time Render sleeps.
-app.post('/api/visit', async (req, res) => {
+app.post('/api/visit', rlMiddleware('visit', 3, 20000, 'Too many pings.'), async (req, res) => {
   const { clientId } = req.body;
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   const now = Date.now();
   const exists = await uniqueCol.findOne({ _id: clientId });
   if (!exists) {
@@ -573,10 +628,10 @@ app.get('/api/settings', async (req, res) => {
 });
 
 // ── Poll vote ─────────────────────────────────────────
-// LEARN: We store pollUserVotes as { [clientId]: 'a'|'b' } in MongoDB.
-// This lets us check per-user votes without a separate collection.
-app.post('/api/poll/:id/vote', async (req, res) => {
+app.post('/api/poll/:id/vote', rlMiddleware('poll', 10, 60000, 'Too many poll votes.'), async (req, res) => {
   const { clientId, option } = req.body;
+  if (!validateClientId(clientId))
+    return res.status(400).json({ error: 'Invalid clientId' });
   if (!clientId || !option)
     return res.status(400).json({ error: 'clientId and option required' });
   const item = await confCol.findOne({ id: req.params.id });
@@ -584,21 +639,40 @@ app.post('/api/poll/:id/vote', async (req, res) => {
   const validOptions = Object.keys(item.pollOptions || {});
   if (!validOptions.includes(option)) return res.status(400).json({ error: 'Invalid poll option' });
   const prev = item.pollUserVotes?.[clientId];
+  // If already voted the SAME option — no change (idempotent, prevents double-counting)
+  if (prev === option) {
+    return res.json({ pollVotes: item.pollVotes, myVote: option, changed: false });
+  }
   const inc = { [`pollVotes.${option}`]: 1 };
-  if (prev && validOptions.includes(prev)) inc[`pollVotes.${prev}`] = -1;
+  if (prev && validOptions.includes(prev)) {
+    // Only decrement previous if the current count is > 0 (never go negative)
+    const prevCount = item.pollVotes?.[prev] || 0;
+    if (prevCount > 0) inc[`pollVotes.${prev}`] = -1;
+  }
   await confCol.updateOne({ id: req.params.id }, {
     $inc: inc,
     $set: { [`pollUserVotes.${clientId}`]: option }
   });
+  // Clamp all poll vote counts to >= 0 (defensive, prevents negative display)
   const u = await confCol.findOne({ id: req.params.id });
-  res.json({ pollVotes: u.pollVotes, myVote: u.pollUserVotes?.[clientId] || option, changed: !!prev });
+  const clampedVotes = {};
+  let needsClamp = false;
+  for (const [k, v] of Object.entries(u.pollVotes || {})) {
+    clampedVotes[k] = Math.max(0, v);
+    if (v < 0) needsClamp = true;
+  }
+  if (needsClamp) {
+    await confCol.updateOne({ id: req.params.id }, { $set: { pollVotes: clampedVotes } });
+  }
+  res.json({ pollVotes: needsClamp ? clampedVotes : u.pollVotes, myVote: option, changed: !!prev });
 });
 
 // ── "This is me!" ─────────────────────────────────────
 // LEARN: thisIsMe is an array of clientIds stored on the confession document.
 // We use $push to append and check for duplicates before pushing.
-app.post('/api/thisisme/:id', async (req, res) => {
+app.post('/api/thisisme/:id', rlMiddleware('thisisme', 10, 60000, 'Too many requests.'), async (req, res) => {
   const { clientId } = req.body;
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   if (!clientId) return res.status(400).json({ error: 'clientId required' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
@@ -696,10 +770,10 @@ app.post('/api/admin/delete', async (req, res) => {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 // ── Community report + reply delete routes ────────────────────────────────────
 const REPORT_THRESHOLD = 3;
-app.post('/api/report/:id', async (req, res) => {
+app.post('/api/report/:id', rlMiddleware('report', 5, 3600000, 'Too many reports.'), async (req, res) => {
   const { clientId, reason, otherMessage } = req.body;
   const VALID = ['identity','harassment','fake','spam','other'];
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   if (!VALID.includes(reason)) return res.status(400).json({ error: 'Invalid reason' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
@@ -751,9 +825,9 @@ app.post('/api/admin/reply/delete', async (req, res) => {
 
 // REMOVE button — 4 removes → flag for re-review
 const REMOVE_THRESHOLD = 4;
-app.post('/api/remove/:id', async (req, res) => {
+app.post('/api/remove/:id', rlMiddleware('remove', 5, 3600000, 'Too many removals.'), async (req, res) => {
   const { clientId } = req.body;
-  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
   const item = await confCol.findOne({ id: req.params.id });
   if (!item) return res.status(404).json({ error: 'Not found' });
   if ((item.removedBy||[]).includes(clientId))
@@ -860,6 +934,12 @@ app.post('/api/admin/prompt', async (req, res) => {
   const { prompt, promptTheme } = req.body; // promptTheme: 'crush'|'hostel'|'exam'|'random'|''
   await settingsCol.updateOne({ _id: 'main' }, { $set: { weeklyPrompt: prompt||'', promptTheme: promptTheme||'' } });
   res.json({ status: 'saved' });
+});
+
+// ── Global error handler — never leak stack traces ────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 connectDB().then(() => {

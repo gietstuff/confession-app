@@ -337,9 +337,18 @@ const HANDLE_RE = /@[a-zA-Z0-9_.]{2,}/g;
 const LINK_RE   = /https?:\/\/[^\s]+/gi;
 
 // ── Roll number patterns — covers most Indian college formats ──
-// LEARN: | in regex means OR. We chain all common roll number formats.
-// Examples caught: 2k22CS045, 22EGCS001, EG/22/CS/001, 2022CSE045
+// LEARN: We now keep all digits EXCEPT the last one, replacing it with _.
+// So "2k22CS045" becomes "2k22CS04_" — branch and year visible, identity hidden.
+// The regex captures the whole roll number, then a replace function trims last digit.
+// Example: 22EGCS001 → 22EGCS00_   |   EG/22/001 → EG/22/00_
 const ROLL_RE = /\b([2][0-9]{3}[A-Z]{2,4}[0-9]{2,4}|[0-9]{2}[A-Z]{2,6}[0-9]{3,4}|[A-Z]{2,4}[\/\-][0-9]{2}[\/\-][0-9]{3,4}|[A-Z]{2,4}[0-9]{4,8}|[0-9]{4}[A-Z]{2,4}[0-9]{3,4}|\d{2}[A-Z]{2}\d{3,4})\b/gi;
+// Replaces last digit with _ to partially hide roll number
+function maskRoll(roll) {
+  // Replace the last numeric digit with _
+  // LEARN: replace with a function — it runs on each match.
+  // The regex \d(?=\D*$) means "last digit in the string" (lookahead to end).
+  return roll.replace(/\d(?=\D*$)/, '_');
+}
 
 // ── Section/batch identifiers ──
 // Catches: sec-A, section F, CSE-B, branch B, 2nd year A
@@ -365,6 +374,18 @@ const ABUSE_WORDS = [
   'rascal','bakwaas','ullu','bhadwa','bhadwi','hijra','chakka',
   // Common short abuses used in Indian context (context-checked below)
   'mc','bc',
+  // ── Odia abusive words (romanised) ──
+  // LEARN: Odia script doesn't appear in typed confessions — students write
+  // phonetically in English letters. These are the most common spellings.
+  // We add both common alternate spellings (e.g. "bhaudi"/"bhaoudi").
+  // TO ADD MORE: add to this list and redeploy. No other changes needed.
+  'bhaudi','bhaoudi','bhaunda','maabhaudi','maabhaoudi','boudike','sali',
+  'sala','gandu','ganda','harami','khota','khotta','mundamara','painkhia',
+  'painkhiaa','danda','phasi','naakhal','naakal','chhinal','chhinala',
+  'jhiata','jhiyata','tui','tuike','tumare','tera','paka','paaka',
+  'gadha','gadhaputra','kukura','kukure','shuara','shuare','shuari',
+  'beshya','beshyaputra','randa','randaa','kandarpa','beda','murkha',
+  'nachhora','nalayak','nalayaka','besharama','besharam',
 ];
 const ABUSE_RE = new RegExp(
   '(?<![a-zA-Z])(' +
@@ -395,8 +416,13 @@ function isAbusiveShortForm(word, fullText, matchIndex) {
   return true;
 }
 
-// ── Name list (expanded with more Indian names) ──
+// ── Name list — pan-Indian + Odia names common at GIET ──
+// LEARN: GIET University is in Gunupur, Odisha. Most students have Odia names.
+// We add them here so "Sushant likes Priyanka" gets filtered to "[Name] likes [Name]".
+// Names are lowercase — the regex uses 'gi' flag so it matches any case.
+// WHERE TO ADD MORE: just add to the ODIA_NAMES array below.
 const COMMON_NAMES = [
+  // Pan-Indian names (existing)
   'aarav','aditya','akash','akshay','akshat','amit','amitesh','ananya','anjali',
   'ankit','ankita','anushka','arjun','aryan','ashish','bhavya','deepak','deepika',
   'devansh','dhruv','divya','gaurav','harsh','harshit','ishaan','ishika','janhvi',
@@ -407,7 +433,6 @@ const COMMON_NAMES = [
   'sahil','sakshi','sandeep','sanjay','shivam','shreya','siddharth','simran',
   'sneha','soham','sourav','sumit','suraj','swati','tanvi','tushar','udit',
   'vaibhav','vandana','vibhav','vikash','vikas','vishal','yash','yashasvi','zara',
-  // more common GIET-context names
   'himanshu','harshita','sarthak','utkarsh','aakash','abhishek','ajay','alok',
   'aman','amisha','anand','anshul','anurag','apoorva','astha','ayush','bhanu',
   'chetan','chirag','devika','diksha','dinesh','garima','girish','hitesh',
@@ -417,7 +442,50 @@ const COMMON_NAMES = [
   'seema','shubham','sonika','sourabh','subham','sudhir','sunil','suresh',
   'swapnil','tarun','umesh','vicky','vijay','vinay','vineet','vivek','yogesh',
 ];
-const NAME_RE = new RegExp('\\b(' + COMMON_NAMES.join('|') + ')\\b', 'gi');
+
+// ── Odia names — common at GIET University, Gunupur ──
+// LEARN: These are romanised spellings of common Odia names.
+// Odia names often have multiple spellings (Subhashree / Subhasree) —
+// we add both variants so neither slips through.
+// TO ADD MORE: just add to this array, redeploy. That's it.
+const ODIA_NAMES = [
+  // Male names
+  'abinash','abhimanyu','asish','asit','aurobindo','basudev','bibhuti','bibhudatta',
+  'bipin','bishal','biswajit','debashis','debashish','debasish','deepak','dillip',
+  'dipak','dipankar','durgadutt','gagan','gobinda','gopal','hemant','jagannath',
+  'jyotiranjan','kartik','kishore','krushna','lingaraj','lopamudra','manas',
+  'manoranjan','manoj','mrutunjay','nabin','namrata','narayan','nishikanta',
+  'niranjan','pabitra','padmanabha','prafulla','prasanna','prashanta','pratap',
+  'pravat','purna','rabindra','rabi','ramakanta','ranjit','rasmi','ratnakar',
+  'sabyasachi','samir','santosh','sarada','satyabrata','satyajit','sibasis',
+  'sibasish','sibsankar','siddharth','sitakanta','smrutiranjan','soumya','sovan',
+  'subash','subhankar','subhranshu','sudhansu','sudhir','sukanta','suman',
+  'sundar','supratik','suresh','susanta','sushant','swadhin','tapan','trilochan',
+  'tusarkanti','umakanta','upendra','uttam','saswat','saswata','sarthak',
+  // Female names
+  'anuradha','archana','aradhana','bandita','barsha','basanti','bhanumati',
+  'bharati','bhubaneshari','bijaylaxmi','bikashini','binita','binapani','bubuli',
+  'chandrakala','chandramani','chandrani','chitrarekha','debasmita','diptirekha',
+  'gitanjali','hemaprabha','indira','itishree','jayashree','jharana','kalyani',
+  'kalpana','kamala','kasturi','kuntala','laxmipriya','lipsa','lopamudra',
+  'madhusmita','mamata','manasi','mandakini','meenakshi','minakshi','mitali',
+  'monalisa','namita','nibedita','niharika','nilakantha','pabitra','padmaja',
+  'pallabi','payaswinee','piali','pinki','pranati','prativa','pratibha',
+  'priyanka','pujashree','pushpalata','rachita','ranjita','rashmita','rekha',
+  'reena','rina','rosalin','sabita','sabitri','samiksha','sangita','sasmita',
+  'saswati','sibani','sikha','silpi','smita','smruti','sonali','soumyalaxmi',
+  'sradhanjali','sradhanjali','subhashree','subhasree','subhra','sudha','sulochana',
+  'sunita','supriya','susmita','sweta','swetalina','trupti','urmila',
+  // Common Odia surnames (used as first names too)
+  'behera','biswal','dash','das','hota','jena','kar','mahapatra','mallick',
+  'mishra','mohanty','mohapatra','nanda','nayak','panda','parida','pati',
+  'patnaik','pradhan','rout','sahoo','samantaray','sahu','satpathy',
+];
+
+// Merge all names into one regex
+// LEARN: [...new Set()] removes duplicates in case a name appears in both lists
+const ALL_NAMES = [...new Set([...COMMON_NAMES, ...ODIA_NAMES])];
+const NAME_RE = new RegExp('\b(' + ALL_NAMES.join('|') + ')\b', 'gi');
 
 function blurWord(word) {
   if (word.length <= 2) return '*'.repeat(word.length);
@@ -442,7 +510,9 @@ function filterConfession(rawText) {
   if (HANDLE_RE.test(text)) { flags.push('handle'); text = text.replace(HANDLE_RE, '[handle hidden]'); }
 
   // 5. Roll numbers (new — catches 2k22CS045 etc.)
-  if (ROLL_RE.test(text)) { flags.push('roll'); text = text.replace(ROLL_RE, '[roll hidden]'); } ROLL_RE.lastIndex = 0;
+  // LEARN: maskRoll keeps most of the roll number visible (branch/year) but hides the last digit.
+  // 2k22CS045 → 2k22CS04_   so context is preserved but exact identity is hidden.
+  if (ROLL_RE.test(text)) { flags.push('roll'); text = text.replace(ROLL_RE, m => maskRoll(m)); } ROLL_RE.lastIndex = 0;
 
   // 6. Section/batch identifiers
   if (SECTION_RE.test(text)) { flags.push('section'); text = text.replace(SECTION_RE, '[section hidden]'); } SECTION_RE.lastIndex = 0;
@@ -1152,6 +1222,38 @@ app.post('/api/admin/mark-abusive', async (req, res) => {
     message: vectorUpserted
       ? '🧠 Confession deleted and pattern learned by AI'
       : '🗑 Confession deleted (vector DB unavailable — configure UPSTASH_VECTOR keys to enable learning)'
+  });
+});
+
+// ── Teach AI: upsert any text pattern directly into Upstash Vector ─────────────
+// LEARN: This endpoint lets you teach the AI from the admin panel WITHOUT
+// having to mark an actual confession as abusive. Use cases:
+//   - Teaching Odia phrases you know are abusive
+//   - Teaching a name pattern like "that girl from hostel 3"
+//   - Teaching any new slang that keeps slipping through
+//
+// HOW IT WORKS:
+//   You send text → we generate a UUID as the vector ID → upsert to Upstash.
+//   From that point on, any confession with similar meaning gets blocked by Layer 2.
+//   This is the "teach by example" approach — no regex needed, just show the AI
+//   examples of what you want blocked and it figures out the pattern.
+//
+// DIFFERENCE FROM MARK ABUSIVE:
+//   Mark Abusive = learn from a real confession that was submitted
+//   Teach AI     = teach a pattern you write yourself, no confession needed
+app.post('/api/admin/teach', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { text, label } = req.body;
+  if (!text || text.trim().length < 3) return res.status(400).json({ error: 'Text too short' });
+  const id = uuidv4();
+  const vectorUpserted = await upsertBannedVector(id, text.trim());
+  return res.json({
+    ok: vectorUpserted,
+    id,
+    message: vectorUpserted
+      ? `🧠 Pattern learned: "${text.slice(0, 60)}"`
+      : 'Vector DB unavailable — check UPSTASH keys'
   });
 });
 

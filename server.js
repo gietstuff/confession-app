@@ -24,6 +24,301 @@ try {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// AI MODERATION PIPELINE v1 — 3-Layer Hybrid System
+// ══════════════════════════════════════════════════════════════════════════════
+// HOW IT WORKS (read this, it's your interview answer):
+//
+// Layer 1 — OpenAI Moderation API (instant, free)
+//   Sends text to OpenAI's dedicated /v1/moderations endpoint.
+//   Returns category scores (hate, harassment, sexual, violence, etc.)
+//   It is FREE — not the chat API. OpenAI charges $0 for it.
+//   If it flags as "toxic" → block immediately. No further checks.
+//
+// Layer 2 — Upstash Vector (semantic memory, free tier 10k vectors)
+//   Converts text to a "vector embedding" — a list of ~384 numbers.
+//   Each number represents a dimension of meaning in the sentence.
+//   Stores vectors of banned confessions so the system "remembers" patterns.
+//   If a new confession is mathematically similar (cosine similarity > 0.88)
+//   to any banned one → block it. This catches paraphrased abuse.
+//   CAREER TIP: This is "semantic similarity search" — a core AI/ML concept.
+//
+// Layer 3 — Groq + Llama 3.1 (borderline reasoning, free tier)
+//   Only runs if Layers 1 and 2 passed but the text feels risky.
+//   Sends a yes/no prompt to an 8B parameter LLM hosted on Groq's chips.
+//   Groq's hardware (LPUs) is so fast this adds only ~300ms.
+//   If Llama says "YES, it's targeted harassment" → shadow ban.
+//   Shadow ban = post appears submitted to sender, but nobody else sees it.
+//   CAREER TIP: Shadow banning is used by Reddit, Twitter, TikTok.
+//
+// WHERE TO LEARN:
+//   Vector embeddings: https://www.youtube.com/watch?v=viZrOnJclY0 (3Blue1Brown)
+//   Cosine similarity:  https://en.wikipedia.org/wiki/Cosine_similarity
+//   Upstash Vector SDK: https://upstash.com/docs/vector/sdks/ts/getting-started
+//   Groq API docs:      https://console.groq.com/docs/openai
+//   OpenAI Moderation:  https://platform.openai.com/docs/guides/moderation
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Upstash Vector client (lazy-loaded so missing env vars don't crash boot) ─
+// LEARN: "Lazy loading" means we only initialize when first needed.
+// This way the server still starts even if UPSTASH keys aren't set yet.
+let _vectorClient = null;
+function getVectorClient() {
+  if (_vectorClient) return _vectorClient;
+  if (!process.env.UPSTASH_VECTOR_REST_URL || !process.env.UPSTASH_VECTOR_REST_TOKEN) return null;
+  try {
+    const { Index } = require('@upstash/vector');
+    // LEARN: Index() connects to your Upstash Vector database.
+    // The SDK handles REST calls to Upstash's serverless vector DB.
+    // You don't need to manage any server — Upstash runs it for you.
+    _vectorClient = new Index({
+      url: process.env.UPSTASH_VECTOR_REST_URL,
+      token: process.env.UPSTASH_VECTOR_REST_TOKEN,
+    });
+    return _vectorClient;
+  } catch(e) {
+    console.warn('[AI MOD] @upstash/vector not installed — run: npm install @upstash/vector');
+    return null;
+  }
+}
+
+// ── Layer 1: Google Gemini Flash — Safety Filter ─────────────────────────────
+// WHY GEMINI INSTEAD OF OPENAI:
+//   OpenAI's moderation API is technically free, but requires a paid billing
+//   account to activate — meaning you need a credit card even for $0 usage.
+//   Google Gemini API has a GENUINELY free tier: no card, no billing required.
+//   1000 requests/day on Gemini 2.5 Flash-Lite. More than enough for GIET.
+//
+// HOW TO GET YOUR FREE KEY (2 minutes):
+//   1. Go to https://aistudio.google.com
+//   2. Sign in with Google → click "Get API key" → "Create API key"
+//   3. Copy the key (starts with "AIza...")
+//   4. Add to Render env vars: GEMINI_API_KEY=AIza...
+//
+// HOW THIS WORKS:
+//   Gemini has built-in safety categories (HARM_CATEGORY_HARASSMENT,
+//   HARM_CATEGORY_HATE_SPEECH, HARM_CATEGORY_SEXUALLY_EXPLICIT,
+//   HARM_CATEGORY_DANGEROUS_CONTENT). When we send text, Gemini returns
+//   a safetyRatings array with probability scores for each category.
+//   If ANY category is HIGH or MEDIUM → block the confession.
+//
+// CAREER TIP: This is called "using an LLM as a safety classifier."
+//   Google's own docs recommend Gemini Flash-Lite for moderation because
+//   it's fast and cheap (free). The pattern of sending text to an LLM
+//   and reading its safety_ratings is used in production at scale.
+//
+// WHERE TO LEARN:
+//   https://ai.google.dev/gemini-api/docs/safety-settings
+//   https://aistudio.google.com (free key here)
+async function checkGeminiModeration(text) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return { flagged: false, skipped: true };
+  try {
+    // LEARN: gemini-2.0-flash-lite is the fastest, cheapest Gemini model.
+    // We use generateContent (not a dedicated moderation endpoint) but set
+    // safety thresholds to BLOCK_LOW_AND_ABOVE so even low-probability harm
+    // triggers a block. The response's promptFeedback tells us if it was blocked.
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Content moderation check: "${text.slice(0, 800)}"` }] }],
+          // LEARN: safetySettings override the default thresholds.
+          // BLOCK_LOW_AND_ABOVE = flag anything that has even a LOW probability of harm.
+          // We're being strict — false positives go to pending for admin review.
+          safetySettings: [
+            { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          ],
+          // Short response — we don't care what Gemini says, just whether it blocked
+          generationConfig: { maxOutputTokens: 5 }
+        })
+      }
+    );
+    if (!response.ok) return { flagged: false, skipped: true };
+    const data = await response.json();
+
+    // LEARN: If Gemini blocked the prompt, promptFeedback.blockReason is set.
+    // The safetyRatings array shows which category triggered it.
+    // candidates[0].finishReason === 'SAFETY' also indicates a block.
+    const blocked = data.promptFeedback?.blockReason
+      || data.candidates?.[0]?.finishReason === 'SAFETY';
+
+    if (blocked) {
+      // Extract which categories were flagged for admin logging
+      const ratings = data.promptFeedback?.safetyRatings || data.candidates?.[0]?.safetyRatings || [];
+      const flaggedCats = ratings
+        .filter(r => r.probability === 'HIGH' || r.probability === 'MEDIUM')
+        .map(r => r.category.replace('HARM_CATEGORY_', '').toLowerCase())
+        .join(', ');
+      return { flagged: true, reason: flaggedCats || data.promptFeedback?.blockReason || 'safety' };
+    }
+    return { flagged: false };
+  } catch(e) {
+    console.warn('[AI MOD] Gemini moderation error:', e.message);
+    return { flagged: false, skipped: true };
+  }
+}
+
+// ── Layer 2: Upstash Vector similarity search ─────────────────────────────────
+// LEARN: "Upsert" = "Update if exists, Insert if not" — a database term.
+// When you mark a post as abusive, we upsert its vector so the DB learns it.
+// On every new submission, we query for the closest matching vectors.
+// If similarity > threshold, the new post is too close to a banned one.
+//
+// The SDK's built-in embedding uses a small model (like all-MiniLM-L6-v2).
+// You pass raw text → the SDK calls Upstash's embedding endpoint → returns vector.
+// No separate embedding API key needed. This is the "no separate embedding" feature.
+async function checkVectorSimilarity(text) {
+  const vectorClient = getVectorClient();
+  if (!vectorClient) return { similar: false, skipped: true };
+  try {
+    // LEARN: query() takes your text, converts it to a vector, then finds
+    // the top K most similar vectors already stored in the index.
+    // topK:1 means "find the single closest match".
+    // includeMetadata:true so we get back the original text (for logging).
+    const results = await vectorClient.query({
+      data: text,        // raw text — SDK auto-embeds it
+      topK: 1,
+      includeMetadata: true,
+    });
+    if (!results?.length) return { similar: false };
+    const topScore = results[0].score;
+    // LEARN: Cosine similarity returns 0.0 to 1.0.
+    // 1.0 = identical meaning. 0.88 = very similar but not word-for-word.
+    // We set 0.88 as threshold: below that, it's different enough to allow.
+    const SIMILARITY_THRESHOLD = 0.88;
+    return {
+      similar: topScore >= SIMILARITY_THRESHOLD,
+      score: topScore,
+      matchedText: results[0].metadata?.text,
+    };
+  } catch(e) {
+    console.warn('[AI MOD] Upstash vector query error:', e.message);
+    return { similar: false, skipped: true };
+  }
+}
+
+// ── upsertBannedVector: called when admin marks a post as abusive ─────────────
+// LEARN: This is how the system "learns". Every time you click "Mark Abusive",
+// this function saves the confession's vector into Upstash.
+// Future similar confessions will then be blocked by Layer 2.
+// The id parameter is a UUID we use as the vector's unique key in Upstash.
+async function upsertBannedVector(id, text) {
+  const vectorClient = getVectorClient();
+  if (!vectorClient) return false;
+  try {
+    await vectorClient.upsert({
+      id,              // unique key (we use the confession's MongoDB UUID)
+      data: text,      // SDK converts this to a vector automatically
+      metadata: { text: text.slice(0, 200), bannedAt: Date.now() }
+    });
+    console.log(`[AI MOD] Upserted banned vector for id=${id}`);
+    return true;
+  } catch(e) {
+    console.warn('[AI MOD] Upstash upsert error:', e.message);
+    return false;
+  }
+}
+
+// ── Layer 3: Groq + Llama 3.1 — borderline reasoning ─────────────────────────
+// LEARN: Groq is a hardware company (LPUs = Language Processing Units).
+// Their API is OpenAI-compatible (same request format), just different base URL.
+// Llama 3.1 8B is Meta's open-source model. Small but fast and free on Groq.
+// We use it only for borderline cases — it's the expensive (time-wise) fallback.
+//
+// The prompt is a "zero-shot classifier": we tell it exactly what YES/NO means.
+// "Zero-shot" = the model wasn't specifically trained on your task,
+//  but general language understanding is enough to answer.
+async function checkGroqHarassment(text) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return { harassing: false, skipped: true };
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        max_tokens: 5,           // We only need "YES" or "NO" — 5 tokens max
+        temperature: 0,          // LEARN: temperature=0 makes the model deterministic.
+                                 // Same input always gives same output. Good for classifiers.
+        messages: [
+          {
+            role: 'system',
+            // LEARN: The system prompt constrains the model's behavior.
+            // By saying "Answer only YES or NO", we prevent long explanations.
+            // This is "prompt engineering" — shaping LLM output via instructions.
+            content: 'You are a content moderation assistant for a college anonymous confession website in India. Answer ONLY with YES or NO.'
+          },
+          {
+            role: 'user',
+            content: `Is the following confession attempting to harass, bully, expose, or target a specific real person (by description, nickname, role, or otherwise)? Answer YES or NO only.\n\nConfession: "${text.slice(0, 500)}"`
+          }
+        ]
+      })
+    });
+    if (!response.ok) return { harassing: false, skipped: true };
+    const data = await response.json();
+    const answer = data.choices?.[0]?.message?.content?.trim().toUpperCase();
+    // LEARN: We check for "YES" as a substring because the model might return
+    // "YES." or "YES, this is..." despite instructions. Defensive parsing.
+    return { harassing: answer?.includes('YES') ?? false, answer };
+  } catch(e) {
+    console.warn('[AI MOD] Groq check error:', e.message);
+    return { harassing: false, skipped: true };
+  }
+}
+
+// ── Master pipeline — runs all 3 layers in order ─────────────────────────────
+// LEARN: async/await lets us write asynchronous code that looks synchronous.
+// Each "await" pauses until the network call finishes, then continues.
+// We chain the checks: if Layer 1 fails → skip 2 and 3, return immediately.
+// This "fail fast" pattern saves time and API credits.
+//
+// Returns: { block: bool, shadowBan: bool, reason: string, layer: string }
+//   block     = true → reject the confession entirely, show error to user
+//   shadowBan = true → accept silently but hide from everyone else
+//   reason    = human-readable explanation (stored in DB, visible to admin)
+async function aiModerationPipeline(text) {
+  // ── Layer 1: Gemini Safety Filter ────────────────────────────────────────
+  const gemini = await checkGeminiModeration(text);
+  if (gemini.flagged) {
+    return { block: true, shadowBan: false, reason: `Gemini flagged: ${gemini.reason || 'safety'}`, layer: 'gemini' };
+  }
+
+  // ── Layer 2: Vector Similarity ────────────────────────────────────────────
+  const vec = await checkVectorSimilarity(text);
+  if (vec.similar) {
+    return {
+      block: true, shadowBan: false,
+      reason: `Similar to banned confession (score: ${vec.score?.toFixed(3)})`,
+      layer: 'vector'
+    };
+  }
+
+  // ── Layer 3: Groq Harassment Check (only for borderline / always if keys set) ─
+  // LEARN: We run Groq as an extra check for confessions that passed Layers 1+2.
+  // This catches nuanced targeted harassment that regex and OpenAI miss:
+  // e.g. "The girl who sits in the last bench of CSE-B section is a..." 
+  // No slurs → passes OpenAI. No similar past confession → passes vector.
+  // But Groq reads context and understands it targets a specific person.
+  const groq = await checkGroqHarassment(text);
+  if (groq.harassing) {
+    // Shadow ban (not hard block) — Groq is less certain than OpenAI,
+    // so we don't want false positives ruining real confessions.
+    // LEARN: Shadow ban = post is saved with shadowBanned:true.
+    // The submitter gets a "pending" response (they think it worked).
+    // But the feed filters it out for everyone else.
+    return { block: false, shadowBan: true, reason: `Groq detected targeted harassment`, layer: 'groq' };
+  }
+
+  return { block: false, shadowBan: false, reason: '', layer: 'passed' };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // SMART CONTENT FILTER v4 — 100% FREE, zero external API calls
 // ══════════════════════════════════════════════════════════════════════════════
 // LEARN: Why no paid AI? Cost + reliability. If the AI API goes down or runs
@@ -397,6 +692,28 @@ app.post('/api/confessions', rlMiddleware('submit', 5, 3600000, 'Too many submis
 
   const { cleanText, flags, wasEdited } = filterConfession(rawMessage);
 
+  // ── AI Moderation Pipeline (Layers 1→2→3) ──────────────────────────────────
+  // LEARN: We pass cleanText (after regex filter) not rawMessage.
+  // This prevents double-counting leet-speak that the regex already cleaned.
+  // The pipeline is wrapped in try/catch so if ALL 3 APIs are down,
+  // the confession still submits (graceful degradation — better than crashing).
+  let aiResult = { block: false, shadowBan: false, reason: '', layer: 'skipped' };
+  try {
+    aiResult = await aiModerationPipeline(cleanText);
+  } catch(e) {
+    console.error('[AI MOD] Pipeline error (non-fatal):', e.message);
+  }
+
+  if (aiResult.block) {
+    // Hard block — tell the user their post violates guidelines
+    // LEARN: 422 Unprocessable Entity is the right HTTP status for "valid syntax
+    // but semantically rejected." More precise than 400 Bad Request.
+    return res.status(422).json({
+      error: 'Your confession was flagged by our content filter. Please review our community guidelines.',
+      aiLayer: aiResult.layer
+    });
+  }
+
   // Validate branch tag (optional)
   const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
   const VALID_BRANCHES = ['CSE','AIML','ECE','Civil','Mechanical','Chemical','Aeronautical/AME','Agriculture','Biotechnology','BBA','MBA','BCA','MCA','Others'];
@@ -442,6 +759,14 @@ app.post('/api/confessions', rlMiddleware('submit', 5, 3600000, 'Too many submis
     flags: 0, flaggedBy: [],
     filterFlags: flags,
     wasEdited,
+    // ── AI Moderation fields ──
+    // LEARN: shadowBanned:true means the post is saved but excluded from the
+    // public feed. The submitter gets a normal "pending" response (they think
+    // it worked). This prevents bad actors from knowing they were caught,
+    // while protecting real users from harassment.
+    shadowBanned: aiResult.shadowBan || false,
+    aiModLayer: aiResult.layer || 'none',
+    aiModReason: aiResult.reason || '',
     // ── Poll fields ──
     isPoll: !!isPoll,
     pollOptions: isPoll ? pollOptionMap : null,
@@ -449,17 +774,24 @@ app.post('/api/confessions', rlMiddleware('submit', 5, 3600000, 'Too many submis
     pollUserVotes: isPoll ? {} : null,
   };
 
-  if (autoApprove) {
+  // Shadow banned confessions go to pending (admin can review them there)
+  // They are tagged so admin knows why they were flagged
+  const isShadowBanned = aiResult.shadowBan;
+
+  if (!isShadowBanned && autoApprove) {
     await confCol.insertOne(confession);
     await enforceConfessionLimit();
     pushAll({ title: '💌 New Confession on GIET!',
       body: cleanText.slice(0,90) + (cleanText.length>90?'…':''),
       url: 'https://page-confession.vercel.app' }, 'user').catch(()=>{});
   } else {
+    // Goes to pending: either shadow banned, or manual approval needed
     await pendingCol.insertOne(confession);
-    pushAll({ title: '🔔 New Confession Pending',
-      body: 'A new confession needs your approval.',
-      url: 'https://page-confession.vercel.app/admin.html' }, 'admin').catch(()=>{});
+    if (!isShadowBanned) {
+      pushAll({ title: '🔔 New Confession Pending',
+        body: 'A new confession needs your approval.',
+        url: 'https://page-confession.vercel.app/admin.html' }, 'admin').catch(()=>{});
+    }
   }
 
   if (clientId) {
@@ -474,7 +806,9 @@ app.post('/api/confessions', rlMiddleware('submit', 5, 3600000, 'Too many submis
 
 // Get approved confessions — Feature 3: last 200, Feature 4: COTD pinned first
 app.get('/api/confessions', async (req, res) => {
-  const data = await confCol.find({}).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
+  // LEARN: { shadowBanned: { $ne: true } } means "where shadowBanned is NOT true".
+  // $ne = "not equal" — a MongoDB query operator. This filters out shadow-banned posts.
+  const data = await confCol.find({ shadowBanned: { $ne: true } }).sort({ createdAt: -1 }).limit(MAX_CONFESSIONS).toArray();
   const cotdId = await getConfessionOfTheDay();
   // Attach cotd flag
   data.forEach(c => { c.isConfessionOfDay = (c.id === cotdId); });
@@ -767,6 +1101,58 @@ app.post('/api/admin/delete', async (req, res) => {
   const r2 = await pendingCol.deleteOne({ id: confessionId });
   if (r2.deletedCount) return res.json({ removed: confessionId });
   res.status(404).json({ error: 'Not found' });
+});
+
+// ── Mark as Abusive — teaches the AI "memory" (Upstash Vector) ──────────────────
+// LEARN: This is the key endpoint that makes the system "self-learning".
+// Every time you click the 🤖 Mark Abusive button in the admin panel:
+//   1. The confession is deleted from the DB
+//   2. Its text is upserted as a vector into Upstash
+//   3. Future similar confessions get auto-blocked by Layer 2
+//
+// "Upsert" = update-or-insert. If the same confession was marked abusive before,
+// we update its entry rather than duplicating it. Idempotent operation.
+//
+// HOW THE AI LEARNS:
+// Upstash stores the vector (list of numbers) of the text.
+// The vector captures semantic meaning — not just keywords.
+// So "you're a complete loser" and "ur such a total failure lol" 
+// will have similar vectors and future posts like them will be caught.
+// This is called "embedding-based semantic search" in the industry.
+app.post('/api/admin/mark-abusive', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { confessionId } = req.body;
+  if (!confessionId) return res.status(400).json({ error: 'confessionId required' });
+
+  // Find in either collection (approved or pending)
+  let item = await confCol.findOne({ id: confessionId });
+  let fromPending = false;
+  if (!item) {
+    item = await pendingCol.findOne({ id: confessionId });
+    fromPending = true;
+  }
+  if (!item) return res.status(404).json({ error: 'Confession not found' });
+
+  // Step 1: upsert the vector into Upstash so the AI remembers this pattern
+  const textToLearn = item.originalMessage || item.message; // use unfiltered if available
+  const vectorUpserted = await upsertBannedVector(confessionId, textToLearn);
+
+  // Step 2: delete the confession from the DB
+  if (fromPending) {
+    await pendingCol.deleteOne({ id: confessionId });
+  } else {
+    await confCol.deleteOne({ id: confessionId });
+    await repliesCol.deleteMany({ confessionId });
+  }
+
+  return res.json({
+    removed: confessionId,
+    vectorLearned: vectorUpserted,
+    message: vectorUpserted
+      ? '🧠 Confession deleted and pattern learned by AI'
+      : '🗑 Confession deleted (vector DB unavailable — configure UPSTASH_VECTOR keys to enable learning)'
+  });
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

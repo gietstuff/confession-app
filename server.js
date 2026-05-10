@@ -179,7 +179,7 @@ function filterConfession(rawText) {
 
 // ── MongoDB ───────────────────────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI;
-let confCol, pendingCol, analyticsCol, uniqueCol, repliesCol, settingsCol, pushSubCol;
+let confCol, pendingCol, analyticsCol, uniqueCol, repliesCol, settingsCol, pushSubCol, discussionsCol, suggestionsCol;
 
 async function connectDB() {
   const client = new MongoClient(MONGO_URI);
@@ -192,6 +192,8 @@ async function connectDB() {
   repliesCol   = db.collection('replies');
   settingsCol  = db.collection('settings');
   pushSubCol   = db.collection('push_subscriptions');
+  discussionsCol = db.collection('discussions');
+  suggestionsCol = db.collection('suggestions');
   console.log('MongoDB connected');
 
   await analyticsCol.updateOne({ _id: 'main' },
@@ -397,7 +399,7 @@ app.post('/api/confessions', rlMiddleware('submit', 5, 3600000, 'Too many submis
 
   // Validate branch tag (optional)
   const VALID_YEARS    = ['1st Year','2nd Year','3rd Year','4th Year'];
-  const VALID_BRANCHES = ['CSE','AIML','ECE','AGRI','BBA','MBA','BCA','MCA','Others'];
+  const VALID_BRANCHES = ['CSE','AIML','ECE','Civil','Mechanical','Chemical','Aeronautical/AME','Agriculture','Biotechnology','BBA','MBA','BCA','MCA','Others'];
   let branchTag = null;
   if (branch && branch.year && branch.branch) {
     if (VALID_YEARS.includes(branch.year) && VALID_BRANCHES.includes(branch.branch)) {
@@ -870,6 +872,113 @@ app.post('/api/admin/clear-review', async (req, res) => {
 app.post('/api/view/:id', async (req, res) => {
   await confCol.updateOne({ id: req.params.id }, { $inc: { views: 1 } });
   res.json({ ok: true });
+});
+
+// ════════════════════════════════════════════════════════
+// DISCUSSION ENDPOINTS (unrelated community chat)
+// ════════════════════════════════════════════════════════
+const MAX_DISCUSSIONS = 300;
+
+// GET all discussion messages (newest first, limit 300)
+app.get('/api/discussions', async (req, res) => {
+  const data = await discussionsCol.find({ hidden: { $ne: true } }).sort({ createdAt: -1 }).limit(MAX_DISCUSSIONS).toArray();
+  res.json(data);
+});
+
+// POST a new discussion message
+app.post('/api/discussions', rlMiddleware('discuss', 8, 300000, 'Too many messages. Wait 5 minutes.'), async (req, res) => {
+  const { message, displayName, clientId } = req.body;
+  if (clientId && !validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  const raw = (message || '').trim();
+  if (!raw) return res.status(400).json({ error: 'Message cannot be empty.' });
+  if (raw.length > 500) return res.status(400).json({ error: 'Message too long (max 500 chars).' });
+  // Sanitize display name — no PII leaking
+  const safeName = String(displayName || '').trim().slice(0, 30).replace(/<[^>]*>/g, '') || null;
+  const doc = {
+    id: uuidv4(),
+    message: raw,
+    displayName: safeName,
+    clientId: clientId || null,
+    createdAt: Date.now(),
+    flags: 0,
+    flaggedBy: [],
+    hidden: false
+  };
+  await discussionsCol.insertOne(doc);
+  res.json({ status: 'ok', message: doc });
+});
+
+// Flag a discussion message — 1 flag hides it immediately
+const DISCUSSION_FLAG_THRESHOLD = 1;
+app.post('/api/discussions/flag/:id', rlMiddleware('dflag', 10, 60000, 'Too many flags.'), async (req, res) => {
+  const { clientId } = req.body;
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  const item = await discussionsCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  if ((item.flaggedBy || []).includes(clientId)) return res.json({ flags: item.flags, alreadyFlagged: true });
+  await discussionsCol.updateOne({ id: req.params.id }, { $inc: { flags: 1 }, $push: { flaggedBy: clientId } });
+  const updated = await discussionsCol.findOne({ id: req.params.id });
+  const flagCount = updated.flags || 0;
+  if (flagCount >= DISCUSSION_FLAG_THRESHOLD && !item.hidden) {
+    await discussionsCol.updateOne({ id: req.params.id }, { $set: { hidden: true } });
+  }
+  res.json({ flags: flagCount, hidden: flagCount >= DISCUSSION_FLAG_THRESHOLD });
+});
+
+// Admin: get all discussions including hidden
+app.get('/api/admin/discussions', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const data = await discussionsCol.find({}).sort({ createdAt: -1 }).limit(200).toArray();
+  res.json(data);
+});
+
+// Admin: delete a discussion message
+app.post('/api/admin/discussions/delete', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { messageId } = req.body;
+  if (!messageId) return res.status(400).json({ error: 'messageId required' });
+  await discussionsCol.deleteOne({ id: messageId });
+  res.json({ removed: messageId });
+});
+
+// ════════════════════════════════════════════════════════
+// SUGGESTION ENDPOINTS
+// ════════════════════════════════════════════════════════
+
+// POST a suggestion — no filter, goes straight to admin
+app.post('/api/suggestions', rlMiddleware('suggest', 3, 3600000, 'Too many suggestions. Try again later.'), async (req, res) => {
+  const { message, clientId } = req.body;
+  const raw = (message || '').trim();
+  if (!raw) return res.status(400).json({ error: 'Suggestion cannot be empty.' });
+  if (raw.length > 1000) return res.status(400).json({ error: 'Suggestion too long (max 1000 chars).' });
+  const doc = {
+    id: uuidv4(),
+    message: raw,
+    clientId: clientId || null,
+    createdAt: Date.now(),
+    tag: 'suggestion'
+  };
+  await suggestionsCol.insertOne(doc);
+  res.json({ status: 'ok' });
+});
+
+// Admin: get all suggestions
+app.get('/api/suggestions', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const data = await suggestionsCol.find({}).sort({ createdAt: -1 }).limit(200).toArray();
+  res.json(data);
+});
+
+// Admin: delete a suggestion
+app.post('/api/admin/suggestions/delete', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { suggestionId } = req.body;
+  await suggestionsCol.deleteOne({ id: suggestionId });
+  res.json({ removed: suggestionId });
 });
 
 app.get('/health', (req, res) => {

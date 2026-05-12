@@ -1396,8 +1396,12 @@ app.post('/api/discussions', rlMiddleware('discuss', 8, 300000, 'Too many messag
   res.json({ status: 'ok', message: doc });
 });
 
-// Flag a discussion message — 1 flag hides it immediately
-const DISCUSSION_FLAG_THRESHOLD = 1;
+// Flag a discussion message
+// LEARN: Changed threshold from 1→3. Before, 1 flag = immediately hidden, meaning
+// a single troll could hide any message they disliked. Now 3 flags = hidden,
+// AND the message is sent to admin for review (flaggedForReview:true).
+// The AI also learns from flagged messages via upsertBannedVector.
+const DISCUSSION_FLAG_THRESHOLD = 3;
 app.post('/api/discussions/flag/:id', rlMiddleware('dflag', 10, 60000, 'Too many flags.'), async (req, res) => {
   const { clientId } = req.body;
   if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
@@ -1407,10 +1411,45 @@ app.post('/api/discussions/flag/:id', rlMiddleware('dflag', 10, 60000, 'Too many
   await discussionsCol.updateOne({ id: req.params.id }, { $inc: { flags: 1 }, $push: { flaggedBy: clientId } });
   const updated = await discussionsCol.findOne({ id: req.params.id });
   const flagCount = updated.flags || 0;
+
+  // At threshold: hide from public + mark for admin review
   if (flagCount >= DISCUSSION_FLAG_THRESHOLD && !item.hidden) {
-    await discussionsCol.updateOne({ id: req.params.id }, { $set: { hidden: true } });
+    await discussionsCol.updateOne({ id: req.params.id }, {
+      $set: { hidden: true, flaggedForReview: true }
+    });
+    // LEARN: AI learns from flagged discussion messages too.
+    // When 3 users flag a message, we treat it as "probably abusive"
+    // and upsert it to Upstash so similar future messages get blocked
+    // by Layer 2 of the AI pipeline... but for discussions we don't
+    // run the full AI pipeline on submit (too slow for a chat channel).
+    // Instead we learn from community flags after the fact.
+    upsertBannedVector(item.id, item.message).catch(() => {});
   }
-  res.json({ flags: flagCount, hidden: flagCount >= DISCUSSION_FLAG_THRESHOLD });
+  res.json({ flags: flagCount, hidden: flagCount >= DISCUSSION_FLAG_THRESHOLD, flaggedForReview: flagCount >= DISCUSSION_FLAG_THRESHOLD });
+});
+
+// Public: delete your own discussion message
+// LEARN: We verify ownership via clientId — the same UUID stored in localStorage.
+// This is not cryptographically secure (someone could fake a clientId) but it's
+// sufficient for an anonymous college app. The clientId is saved on the message
+// at post time and we compare it here before allowing delete.
+app.post('/api/discussions/delete/:id', rlMiddleware('ddelete', 5, 60000, 'Too many deletions.'), async (req, res) => {
+  const { clientId } = req.body;
+  if (!validateClientId(clientId)) return res.status(400).json({ error: 'Invalid clientId' });
+  const item = await discussionsCol.findOne({ id: req.params.id });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  // Only the original sender can delete
+  if (item.clientId !== clientId) return res.status(403).json({ error: 'You can only delete your own messages.' });
+  await discussionsCol.deleteOne({ id: req.params.id });
+  res.json({ deleted: req.params.id });
+});
+
+// Admin: get flagged discussion messages (for review)
+app.get('/api/admin/discussions/flagged', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const data = await discussionsCol.find({ flaggedForReview: true }).sort({ flags: -1, createdAt: -1 }).limit(100).toArray();
+  res.json(data);
 });
 
 // Admin: get all discussions including hidden
@@ -1429,6 +1468,40 @@ app.post('/api/admin/discussions/delete', async (req, res) => {
   if (!messageId) return res.status(400).json({ error: 'messageId required' });
   await discussionsCol.deleteOne({ id: messageId });
   res.json({ removed: messageId });
+});
+
+// Admin: restore a flagged discussion message (clear flags, unhide)
+app.post('/api/admin/discussions/restore', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { messageId } = req.body;
+  if (!messageId) return res.status(400).json({ error: 'messageId required' });
+  await discussionsCol.updateOne({ id: messageId }, {
+    $set: { hidden: false, flaggedForReview: false, flags: 0, flaggedBy: [] }
+  });
+  res.json({ restored: messageId });
+});
+
+// Admin: mark discussion message as abusive — delete + teach AI
+// LEARN: Same pattern as confession mark-abusive but for discussion messages.
+// Admin sees the flagged message, decides it IS abusive, clicks Mark Abusive.
+// This both deletes it AND upserts its vector so the AI learns the pattern.
+app.post('/api/admin/discussions/mark-abusive', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { messageId } = req.body;
+  if (!messageId) return res.status(400).json({ error: 'messageId required' });
+  const item = await discussionsCol.findOne({ id: messageId });
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  const vectorUpserted = await upsertBannedVector(item.id, item.message);
+  await discussionsCol.deleteOne({ id: messageId });
+  res.json({
+    removed: messageId,
+    vectorLearned: vectorUpserted,
+    message: vectorUpserted
+      ? '🧠 Message deleted and pattern learned by AI'
+      : '🗑 Message deleted (vector DB unavailable)'
+  });
 });
 
 // ════════════════════════════════════════════════════════

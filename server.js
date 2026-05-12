@@ -1452,6 +1452,26 @@ app.get('/api/admin/discussions/flagged', async (req, res) => {
   res.json(data);
 });
 
+// ── Public: get current site version ─────────────────────────────────────────
+app.get('/api/version', async (req, res) => {
+  const settings = await settingsCol.findOne({ _id: 'main' });
+  res.json({ version: settings?.siteVersion || null, label: settings?.siteVersionLabel || null });
+});
+
+// Admin: set site version (triggers update celebration on next visit)
+// Call this after deploying an update via: POST /api/admin/version {version:"v3.2", label:"..."}
+app.post('/api/admin/version', async (req, res) => {
+  const token = req.cookies.admin_token || req.headers['x-admin-token'];
+  if (!isValidSession(token)) return res.status(403).json({ error: 'Unauthorized.' });
+  const { version, label } = req.body;
+  if (!version) return res.status(400).json({ error: 'version required' });
+  await settingsCol.updateOne({ _id: 'main' },
+    { $set: { siteVersion: version, siteVersionLabel: label || '' } },
+    { upsert: true }
+  );
+  res.json({ ok: true, version, label });
+});
+
 // Admin: get all discussions including hidden
 app.get('/api/admin/discussions', async (req, res) => {
   const token = req.cookies.admin_token || req.headers['x-admin-token'];
